@@ -88,8 +88,162 @@ function authed(req, u) {
   return req.headers["x-api-key"] === KEY || u.searchParams.get("key") === KEY;
 }
 
+/* ══════════ mobile settle monitor ══════════
+ * PC pushes an evening bundle (positions+payoff, marks at close or official settle)
+ * to GitHub repo set50-ledger as mobile/<account>.json (see backend/settle_push.py).
+ * The phone opens /view here: bundle comes from GitHub (private -> GH_TOKEN env),
+ * official settlement comes from the public tfex.co.th JSON endpoints (no login;
+ * same Incapsula cookie dance as backend/tfex_settle.py). On-access only, no cron.
+ */
+const GH_TOKEN = process.env.RELAY_GH_TOKEN || "";
+const GH_REPO = process.env.RELAY_GH_REPO || "surasak5305-coder/set50-ledger";
+const TFEX_PAGE = "https://www.tfex.co.th/en/products/equity/set50-index-options/market-data";
+const TFEX_API = "https://www.tfex.co.th/api/set/tfex";
+const TFEX_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+const SETTLE_REFETCH_MS = 5 * 60 * 1000;   // not-final -> retry at most every 5 min
+const MONTH_CODE = { F: 1, G: 2, H: 3, J: 4, K: 5, M: 6, N: 7, Q: 8, U: 9, V: 10, X: 11, Z: 12 };
+
+let tfexCookie = "";                        // Incapsula session cookies
+const settleCache = {};                     // series -> {res, at, finalDate}
+const bundleCache = {};                     // acct -> {res, at}
+
+function tfexNum(v) {
+  if (v == null || v === "" || v === "-") return null;
+  const n = Number(String(v).replace(/,/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+
+async function tfexGet(path, retry) {
+  if (!tfexCookie) {
+    const p = await fetch(TFEX_PAGE, { headers: { "User-Agent": TFEX_UA } });
+    const sc = (p.headers.getSetCookie ? p.headers.getSetCookie() : []) || [];
+    tfexCookie = sc.map((c) => c.split(";")[0]).join("; ");
+  }
+  const r = await fetch(TFEX_API + path, {
+    headers: { "User-Agent": TFEX_UA, "Referer": TFEX_PAGE,
+      "Accept": "application/json", "Cookie": tfexCookie },
+  });
+  if (r.status === 200) return r.json();
+  tfexCookie = "";                          // kicked (403/503) -> new cookies, one retry
+  if (!retry && [401, 403, 429, 503].includes(r.status)) return tfexGet(path, true);
+  throw new Error("tfex HTTP " + r.status);
+}
+
+/* same shape/logic as backend/tfex_settle.fetch(): latest *published* settle,
+ * todayPublished tells whether it is today's (else prior trading day, always final) */
+async function fetchSettle(series) {
+  const tail = series.slice(-3);
+  const cm = String(MONTH_CODE[tail[0]]).padStart(2, "0") + "/20" + tail.slice(1);
+  const fut = await tfexGet("/series/" + series + "/info");
+  let asof, futSettle, useToday;
+  if (tfexNum(fut.settlementPrice) != null) {
+    asof = String(fut.settlementDate || "").slice(0, 10) || new Date().toISOString().slice(0, 10);
+    futSettle = tfexNum(fut.settlementPrice);
+    useToday = true;
+  } else {
+    asof = String(fut.priorSettlementDate || "").slice(0, 10);
+    futSettle = tfexNum(fut.priorSettlementPrice);
+    useToday = false;
+  }
+  if (!asof || futSettle == null) throw new Error("no settle on futures info");
+  const legs = { FUT: futSettle };
+  try {
+    const chain = await tfexGet("/marketlist/TXI_O/options-trading");
+    const cms = ((chain.instruments || [])[0] || {}).contractMonths || [];
+    const block = cms.find((c) => c.contractMonth === cm) || {};
+    for (const row of block.callPutList || []) {
+      for (const [cp, side] of [["C", "call"], ["P", "put"]]) {
+        const v = tfexNum((row[side] || {})[useToday ? "settlementPrice" : "priorSettlementPrice"]);
+        if (v != null) legs[parseInt(row.strikePrice, 10) + "-" + cp] = v;
+      }
+    }
+  } catch { /* futures settle alone still useful */ }
+  return { ok: true, series, asof, todayPublished: useToday, final: true,
+    legs, fetchedAt: new Date().toISOString().slice(0, 19) };
+}
+
+async function settleHandler(res, series) {
+  if (!/^[A-Z0-9]{3,10}$/.test(series)) return sendJSON(res, 400, { ok: false, error: "bad series" });
+  const today = new Date().toISOString().slice(0, 10);
+  const c = settleCache[series];
+  // published-today result is final -> serve forever (per-day); otherwise throttle refetch
+  if (c && (c.finalDate === today || Date.now() - c.at < SETTLE_REFETCH_MS)) {
+    return sendJSON(res, 200, Object.assign({ source: "cache" }, c.res));
+  }
+  try {
+    const out = await fetchSettle(series);
+    settleCache[series] = { res: out, at: Date.now(),
+      finalDate: out.todayPublished && out.asof === today ? today : "" };
+    return sendJSON(res, 200, out);
+  } catch (e) {
+    if (c) return sendJSON(res, 200, Object.assign({ source: "stale-cache" }, c.res));
+    return sendJSON(res, 502, { ok: false, error: String(e.message || e) });
+  }
+}
+
+async function bundleHandler(res, acct) {
+  if (!VALID_ID.test(acct)) return sendJSON(res, 400, { ok: false, error: "bad acct" });
+  if (!GH_TOKEN) return sendJSON(res, 500, { ok: false, error: "RELAY_GH_TOKEN not set" });
+  const c = bundleCache[acct];
+  if (c && Date.now() - c.at < 60 * 1000) return sendJSON(res, 200, c.res);
+  try {
+    const r = await fetch("https://api.github.com/repos/" + GH_REPO + "/contents/mobile/" +
+      encodeURIComponent(acct) + ".json?ref=main", {
+      headers: { "Authorization": "Bearer " + GH_TOKEN,
+        "Accept": "application/vnd.github.raw+json", "User-Agent": "set50-relay" },
+    });
+    if (r.status === 404) return sendJSON(res, 404, { ok: false, error: "no bundle for " + acct });
+    if (r.status !== 200) return sendJSON(res, 502, { ok: false, error: "github HTTP " + r.status });
+    const out = await r.json();
+    bundleCache[acct] = { res: out, at: Date.now() };
+    return sendJSON(res, 200, out);
+  } catch (e) {
+    return sendJSON(res, 502, { ok: false, error: String(e.message || e) });
+  }
+}
+
+const VIEW_HTML = fs.readFileSync(path.join(__dirname, "view.html"));
+const VIEW_ICONS = {
+  "/view-icon-192.png": fs.readFileSync(path.join(__dirname, "view-icon-192.png")),
+  "/view-icon-512.png": fs.readFileSync(path.join(__dirname, "view-icon-512.png")),
+};
+/* own manifest -> "Add to Home Screen" installs /view as its own app + icon,
+   separate from the dashboard PWA. start_url has no params: the page keeps
+   acct/key in localStorage from the first parameterized visit. */
+const VIEW_MANIFEST = JSON.stringify({
+  name: "SET50 Settle Monitor", short_name: "STL", start_url: "/view",
+  display: "standalone", background_color: "#0d1520", theme_color: "#0d1520",
+  icons: [
+    { src: "/view-icon-192.png", sizes: "192x192", type: "image/png" },
+    { src: "/view-icon-512.png", sizes: "512x512", type: "image/png" },
+  ],
+});
+
 const server = http.createServer((req, res) => {
   const u = new URL(req.url, "http://localhost");
+
+  // mobile settle monitor page + its data endpoints
+  if (req.method === "GET" && VIEW_ICONS[u.pathname]) {
+    res.writeHead(200, { "Content-Type": "image/png", "Cache-Control": "public, max-age=86400" });
+    return res.end(VIEW_ICONS[u.pathname]);
+  }
+  if (req.method === "GET" && u.pathname === "/view.webmanifest") {
+    res.writeHead(200, { "Content-Type": "application/manifest+json",
+      "Cache-Control": "public, max-age=86400" });
+    return res.end(VIEW_MANIFEST);
+  }
+  if (req.method === "GET" && u.pathname === "/view") {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+    return res.end(VIEW_HTML);
+  }
+  if (req.method === "GET" && u.pathname === "/api/settle") {
+    return void settleHandler(res, String(u.searchParams.get("series") || "").toUpperCase());
+  }
+  if (req.method === "GET" && u.pathname === "/api/bundle") {
+    if (!authed(req, u)) return sendJSON(res, 401, { ok: false, error: "unauthorized" });
+    return void bundleHandler(res, String(u.searchParams.get("acct") || ""));
+  }
 
   // PC pushes its intraday state here (payoff+positions, ~10-20 KB)
   if (req.method === "POST" && u.pathname === "/api/ingest") {

@@ -1,0 +1,186 @@
+<!doctype html>
+<!-- Mobile settle monitor — open after the PC is off: bundle (positions/payoff pushed by
+     backend/settle_push.py to GitHub) + official settlement fetched on-access from tfex.co.th.
+     No fixed schedule: whatever is published when you open is what you see. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SET50 Settle Monitor</title>
+<link rel="manifest" href="/view.webmanifest">
+<link rel="icon" type="image/png" href="/view-icon-192.png">
+<link rel="apple-touch-icon" href="/view-icon-192.png">
+<meta name="theme-color" content="#0d1520">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>
+  :root { --bg:#0d1520; --card:#13202e; --line:#22384e; --tx:#d7e3ee; --dim:#7d93a8;
+          --green:#37d07c; --red:#ff6b6b; --amber:#ffc95c; --blue:#5aa7e0; }
+  * { box-sizing:border-box; margin:0; }
+  body { background:var(--bg); color:var(--tx); font:14px/1.45 system-ui,sans-serif; padding:10px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:10px 12px; margin-bottom:10px; }
+  h1 { font-size:15px; margin-bottom:2px; }
+  .dim { color:var(--dim); font-size:12px; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px;
+           font-weight:600; margin-left:6px; vertical-align:1px; }
+  .b-official { background:#123e29; color:var(--green); }
+  .b-prov { background:#443311; color:var(--amber); }
+  .big { font-size:26px; font-weight:700; }
+  .pos { color:var(--green); } .neg { color:var(--red); }
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums;
+          table-layout:fixed; }
+  th,td { padding:3px 2px; text-align:right; font-size:12px; overflow:hidden;
+          text-overflow:ellipsis; white-space:nowrap; }
+  .dim { overflow-wrap:anywhere; }
+  th { color:var(--dim); font-weight:500; border-bottom:1px solid var(--line); }
+  td:first-child,th:first-child { text-align:left; }
+  tr.atm td { background:#182c3f; }
+  .tot td { border-top:1px solid var(--line); font-weight:600; }
+  #err { color:var(--red); white-space:pre-wrap; }
+  button { background:#1d3040; color:var(--tx); border:1px solid var(--line);
+           border-radius:8px; padding:7px 14px; font-size:13px; }
+  svg { width:100%; height:190px; display:block; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>SET50 Settle Monitor <span id="badge"></span></h1>
+  <div class="dim" id="meta">loading…</div>
+</div>
+<div class="card" id="totcard" hidden>
+  <div class="dim">Net M2M (as of, after commission)</div>
+  <div class="big" id="net"></div>
+  <div class="dim" id="netsub"></div>
+</div>
+<div class="card" id="paycard" hidden>
+  <div class="dim" style="margin-bottom:4px">Payoff — expiry (solid) · T+0 at push time (dashed)</div>
+  <svg id="pay" preserveAspectRatio="none"></svg>
+  <div class="dim" id="paysub"></div>
+</div>
+<div class="card" id="tblcard" hidden>
+  <div class="dim" style="margin-bottom:4px">Positions as of — marks at <span id="marklbl"></span></div>
+  <table id="tbl"></table>
+</div>
+<div class="card"><button onclick="location.reload()">Refresh</button>
+  <span class="dim" id="err"></span></div>
+<script>
+"use strict";
+const qs = new URLSearchParams(location.search);
+for (const k of ["acct", "key"]) {
+  if (qs.get(k)) localStorage.setItem("sv_" + k, qs.get(k));
+}
+const ACCT = qs.get("acct") || localStorage.getItem("sv_acct") || "";
+const KEY = qs.get("key") || localStorage.getItem("sv_key") || "";
+const $ = (id) => document.getElementById(id);
+const fmt = (v, d) => v == null ? "-" : v.toLocaleString("en-US",
+  { minimumFractionDigits: d ?? 2, maximumFractionDigits: d ?? 2 });
+const cls = (v) => v > 0 ? "pos" : v < 0 ? "neg" : "";
+
+async function main() {
+  if (!ACCT) { $("err").textContent = "add ?acct=<account>&key=<relay key> to the URL once"; return; }
+  const br = await fetch(`/api/bundle?acct=${encodeURIComponent(ACCT)}&key=${encodeURIComponent(KEY)}`);
+  const b = await br.json();
+  if (!br.ok) throw new Error("bundle: " + (b.error || br.status));
+  if (qs.get("test") === "prov") {
+    // dev harness: pretend the PC shut down before settle (provisional marks off by
+    // +1/+2) so the TFEX override + delta-net path runs — see settle-monitor notes
+    b.settled = false;
+    b.positions.asOf.tfex.fMark += 2;
+    for (const r of b.positions.asOf.rows) {
+      if (r.cMark != null) r.cMark += 1;
+      if (r.pMark != null) r.pMark += 1;
+    }
+  }
+  const sr = await fetch(`/api/settle?series=${encodeURIComponent(b.series)}`).catch(() => null);
+  const s = sr && sr.ok ? await sr.json() : null;
+
+  const official = !!(s && s.todayPublished && s.asof === b.date);
+  const legs = official ? s.legs : null;
+  const a = b.positions.asOf, t = a.tfex, g = a.greeks;
+
+  // marks: bundle values, overridden by official TFEX legs when the bundle is provisional
+  const mark = (K, cp, old) => {
+    if (old == null) return null;
+    const v = legs && legs[`${Math.round(K)}-${cp}`];
+    return v != null ? v : old;
+  };
+  const fNew = (legs && legs.FUT != null) ? legs.FUT : t.fMark;
+
+  // net M2M is linear in marks -> exact update from the PC-computed net (commission unchanged)
+  let delta = (t.lfQ - t.sfQ) * (fNew - t.fMark);
+  const rows = [];
+  let grossOld = (t.fMark - t.lfCost) * t.lfQ + (t.sfCost - t.fMark) * t.sfQ;
+  let grossNew = (fNew - t.lfCost) * t.lfQ + (t.sfCost - fNew) * t.sfQ;
+  rows.push({ label: "FUT", qty: t.lfQ - t.sfQ, mark: fNew, m2m: grossNew, atm: false });
+  for (const r of a.rows) {
+    for (const [cp, mk, lq, lc, sq, sc] of [
+      ["C", r.cMark, r.lcQ, r.lcCost, r.scQ, r.scCost],
+      ["P", r.pMark, r.lpQ, r.lpCost, r.spQ, r.spCost]]) {
+      if (mk == null || (!lq && !sq)) continue;
+      const m = mark(r.strike, cp, mk);
+      delta += (lq - sq) * (m - mk);
+      grossOld += (mk - lc) * lq + (sc - mk) * sq;
+      const gm = (m - lc) * lq + (sc - m) * sq;
+      grossNew += gm;
+      rows.push({ label: `${r.label} ${cp}`, qty: lq - sq, mark: m, m2m: gm, atm: r.isATM });
+    }
+  }
+  const netNew = g.m2m + delta;
+  const comm = grossOld - g.m2m;              // implied commission, unchanged by marks
+
+  const settledSrc = b.settled ? "PC (Settrade)" : official ? "TFEX (live fetch)" : null;
+  $("badge").className = "badge " + (settledSrc ? "b-official" : "b-prov");
+  $("badge").textContent = settledSrc ? "OFFICIAL SETTLE" : "PROVISIONAL";
+  $("meta").textContent = `${b.account} · ${b.series} · ${b.date} · bundle ${b.generatedAt}`
+    + (settledSrc ? ` · settle via ${settledSrc}` : " · settle not published yet — refresh later");
+  $("net").textContent = fmt(netNew);
+  $("net").className = "big " + cls(netNew);
+  $("netsub").textContent = `gross ${fmt(grossNew)} − comm ${fmt(comm)} · F settle ${fmt(fNew, 1)}`
+    + ` · Δ ${fmt(g.delta)} Γ ${fmt(g.gamma)} V ${fmt(g.vega)} Θ ${fmt(g.theta)}`;
+  $("totcard").hidden = false;
+
+  $("marklbl").textContent = settledSrc ? `official settle (${settledSrc})` : "close (provisional)";
+  const tb = ["<tr><th>Leg</th><th>Net qty</th><th>Mark</th><th>M2M</th></tr>"];
+  for (const r of rows) {
+    tb.push(`<tr${r.atm ? ' class="atm"' : ""}><td>${r.label}</td><td>${r.qty}</td>` +
+      `<td>${fmt(r.mark, r.label === "FUT" ? 1 : 2)}</td>` +
+      `<td class="${cls(r.m2m)}">${fmt(r.m2m)}</td></tr>`);
+  }
+  tb.push(`<tr class="tot"><td>Total gross</td><td></td><td></td>` +
+    `<td class="${cls(grossNew)}">${fmt(grossNew)}</td></tr>`);
+  $("tbl").innerHTML = tb.join("");
+  $("tblcard").hidden = false;
+  drawPayoff(b.payoff, fNew);
+}
+
+function drawPayoff(p, F) {
+  const pts = p && p.asOf;
+  if (!pts || pts.length < 2) return;
+  const W = 360, H = 190, PAD = 6;
+  const xs = pts.map((d) => d.price);
+  const ys = pts.flatMap((d) => [d.exp, d.now]).filter((v) => v != null);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const y0 = Math.min(...ys, 0), y1 = Math.max(...ys, 0);
+  const X = (v) => PAD + (v - x0) / (x1 - x0) * (W - 2 * PAD);
+  const Y = (v) => H - PAD - (v - y0) / (y1 - y0 || 1) * (H - 2 * PAD);
+  const line = (k) => pts.map((d, i) => (i ? "L" : "M") + X(d.price).toFixed(1) + " " +
+    Y(d[k]).toFixed(1)).join(" ");
+  const sv = $("pay");
+  sv.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  sv.innerHTML =
+    `<line x1="0" x2="${W}" y1="${Y(0)}" y2="${Y(0)}" stroke="#33506b" stroke-width="1"/>` +
+    (F ? `<line x1="${X(F)}" x2="${X(F)}" y1="0" y2="${H}" stroke="#5aa7e0" ` +
+         `stroke-width="1" stroke-dasharray="3 3"/>` : "") +
+    `<path d="${line("exp")}" fill="none" stroke="#37d07c" stroke-width="1.6"/>` +
+    `<path d="${line("now")}" fill="none" stroke="#ffc95c" stroke-width="1.2" ` +
+    `stroke-dasharray="5 4"/>`;
+  const be = (p.beAsof || []).map((v) => fmt(v, 1)).join(" / ");
+  $("paysub").textContent = `range ${fmt(x0, 0)}–${fmt(x1, 0)} · BE ${be || "-"} · F ${fmt(F, 1)}`;
+  $("paycard").hidden = false;
+}
+
+main().catch((e) => { $("err").textContent = String(e.message || e); });
+</script>
+</body>
+</html>
