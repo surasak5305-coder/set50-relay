@@ -332,10 +332,14 @@ function render(d) {
   $("badge").className = "badge " + (final ? "b-official" : "b-prov");
   $("badge").textContent = final ? "SETTLE" : "PROVISIONAL";
   const counts = (rec.counts || {}).asOf || {};
+  // วันนี้ + ยังไม่ปิดวัน = ภาพ ณ ตอนที่เครื่องเทรด push ขึ้น git ครั้งล่าสุด ไม่ใช่ตอนนี้
+  // (ถ้าไม่เขียนให้ชัด จะงงว่าทำไมเลขไม่ตรงจอ PC — ผู้ใช้ทัก 2026-08-21)
+  const isToday = d.date === new Date().toISOString().slice(0, 10);
   $("meta").textContent = `${d.acct} · ${d.series} · ${d.date}`
     + ` · F ${fmt(F, 1)} · ${fmt(T * 365, 0)}d to expiry`
     + (rec.savedAt ? ` · saved ${rec.savedAt}` : "")
-    + (counts.orders != null ? ` · ${counts.orders} orders | ${counts.cons} cons` : "");
+    + (counts.orders != null ? ` · ${counts.orders} orders | ${counts.cons} cons` : "")
+    + (isToday && !final ? " · ภาพที่บันทึกไว้ ไม่ใช่ราคาสด" : "");
 
   // M2M "ที่ยึดเป็นของจริง" = ค่าที่ปักตอนกด M2M Save (m2mSaved) — ผู้ใช้กำหนดไว้ 2026-08-18
   // และเป็นตัวที่การ์ด Position Summary บนจอ PC โชว์ · m2mSettle = ตัวเทียบตอน settle ทางการ
@@ -751,13 +755,14 @@ let liveUntil = 0;               // หยุด auto-refresh เมื่อถ
    ห้ามแหกข้อ 2-4 (กติกาเดียวกับฝั่ง PC: ห้ามปลุก relay นอกเวลาเทรด)                */
 const LIVE_EVERY = 30000;        // วิ ระหว่าง refresh ตอนหน้าเปิดอยู่จริง
 const LIVE_IDLE_MS = 10 * 60000; // เปิดค้างเงียบ ๆ นานสุดก่อนหยุดเอง
-const TRADE_WIN = [[9 * 60 + 45, 12 * 60 + 30], [13 * 60 + 45, 16 * 60 + 55]];
-function inTradingHours() {
-  const d = new Date();                          // นาฬิกาเครื่อง = เวลาไทยของผู้ใช้
-  if (d.getDay() === 0 || d.getDay() === 6) return false;
-  const m = d.getHours() * 60 + d.getMinutes();
-  return TRADE_WIN.some((w) => m >= w[0] && m <= w[1]);
-}
+/* ⚠️ เคยเดาเวลาเทรดเอง (09:45-12:30, 13:45-16:55) แล้วพลาด: กรอบ push จริงของเครื่องเทรด
+   คือ 09:15-12:30 และ **13:45-17:10** (_relay_window_open) ⇒ 16:58 มือถือเข้าโหมดประวัติ
+   ไปแล้วทั้งที่จอ PC ยังสด เลขเลยไม่ตรงกัน (ผู้ใช้เจอ 2026-08-21 16:58)
+   เลิกเดาเวลา — ถาม /api/data ตรง ๆ ว่ามีใคร push อยู่ไหม แล้วให้ "online" เป็นคำตอบ:
+     · การเปิดหน้านี้ปลุก relay อยู่แล้ว (HTML มาจากมันเอง) ⇒ ยิงเพิ่ม 1 ครั้งตอนโหลด = ฟรี
+     · ยิงซ้ำเรื่อย ๆ เกิดเฉพาะตอนมีคน push อยู่จริง ซึ่งแปลว่า relay ตื่นอยู่แล้วเช่นกัน
+     · ไม่มีใคร push = ไม่มี timer เดินเลย (ตกไปโหมดประวัติทันที)
+   ที่กันชั่วโมงจริง ๆ คือ 3 อย่างข้างล่าง: online / จอดับ / เปิดค้างเกิน 10 นาที */
 
 function matchLive(accounts) {
   for (const a of accounts || []) {
@@ -770,8 +775,7 @@ function matchLive(accounts) {
   return null;
 }
 
-async function loadLive(force) {
-  if (!force && !inTradingHours()) return null;   // นอกเวลาเทรด = ไม่มีใคร push อยู่แล้ว
+async function loadLive() {
   try {
     const r = await api("/api/data");
     if (!r.ok) return null;
@@ -1009,7 +1013,7 @@ function go() {
   if (DATE === "live") {
     liveUntil = Math.max(liveUntil, Date.now() + LIVE_IDLE_MS);
     if (LIVE) { renderLive(LIVE); liveLoop(); return; }
-    loadLive(true).then((a) => {
+    loadLive().then((a) => {
       if (!a) { $("err").textContent = "ยังไม่มีข้อมูลสด (เจ้าของไม่ได้เปิดเครื่อง/นอกเวลาเทรด)"; return; }
       LIVE = a; renderLive(a); liveLoop();
     });
@@ -1061,7 +1065,7 @@ async function main() {
   if (!ACCT || !KEY) { showSetup(); return; }
   await loadIndex();
   // มีคน push อยู่ = เปิดหน้ามาต้องเห็น "ตอนนี้" ก่อน (ตัวเลขชุดเดียวกับจอ PC)
-  const a = await loadLive();                 // นอกเวลาเทรดจะไม่ยิงเลย -> ไปที่ประวัติทันที
+  const a = await loadLive();                 // ไม่มีใคร push = ตกไปโหมดประวัติเอง
   if (a) {
     LIVE = a;
     liveUntil = Date.now() + LIVE_IDLE_MS;
