@@ -56,6 +56,12 @@
   .pos-two th, .pos-two td { padding:2px 1px; font-size:10.5px; }
   .pos-two .sum { font-size:11px; }
   .pos-h { color:var(--tx); font-size:12px; font-weight:600; margin-bottom:2px; }
+  /* ระยะ strike เท่าจอ PC: โชว์ ~9 แถวแล้วเลื่อนดูส่วนที่เหลือ โดยเปิดมาให้ ATM อยู่กลางช่อง
+     (จอ PC ใช้ช่องเลื่อนสูงเท่านี้ + focus ที่ ATM — ถ้าปล่อยยาวทั้ง 26 แถวจะหาแถวที่สนใจไม่เจอ) */
+  .tbox { max-height:186px; overflow-y:auto; overscroll-behavior:contain; }
+  .tbox::-webkit-scrollbar { width:4px; }
+  .tbox::-webkit-scrollbar-thumb { background:#2b455e; border-radius:4px; }
+  .pos-two th { position:sticky; top:0; background:var(--card); z-index:1; }
   /* Orders ของวันนั้น — พับเก็บได้ บางวันมีหลายสิบดีล ไม่ควรดันการ์ดอื่นตกจอ (เหมือนจอ PC) */
   .deal-head { width:100%; text-align:left; background:transparent; border:0; padding:0;
                color:var(--dim); font-size:12px; }
@@ -150,12 +156,12 @@
   <div class="pos-two">
     <div id="asofcol">
       <div class="pos-h">As of Today</div>
-      <table id="tbl"></table>
+      <div class="tbox" id="tbox1"><table id="tbl"></table></div>
       <div class="dim" id="asofsum"></div>
     </div>
     <div id="tradedcard">
       <div class="pos-h">Today</div>
-      <table id="tbl2"></table>
+      <div class="tbox" id="tbox2"><table id="tbl2"></table></div>
       <div class="dim" id="tradedsum"></div>
     </div>
   </div>
@@ -316,10 +322,9 @@ function render(d) {
   $("nettitle").textContent = "Net M2M (ปักตอน M2M Save · หลังหักคอม)";
   $("net").textContent = fmt(net);
   $("net").className = "big " + cls(net);
-  $("netsub").textContent = `Δ ${fmt(g.delta)} Γ ${fmt(g.gamma)} V ${fmt(g.vega)} Θ ${fmt(g.theta)}`
-    + (rec.m2mSettle != null && rec.m2mSettle !== net ? ` · at settle ${fmt(rec.m2mSettle)}` : "");
-  $("besub").textContent = (g.be || []).length
-    ? "BE " + g.be.map((v) => fmt(v, 1)).join(" / ") : "";
+  $("netsub").innerHTML = greekLine(g)
+    + (rec.m2mSettle != null && rec.m2mSettle !== net ? " · at settle " + fmt(rec.m2mSettle) : "");
+  $("besub").innerHTML = beHTML(g.beLower, g.beLoDir, g.beUpper, g.beHiDir);
   $("totcard").hidden = false;
 
   // As-of: เส้นที่เครื่องเทรดคำนวณไว้แล้ว (ไม่คิดใหม่ = ตรงกับจอ PC แน่นอน)
@@ -407,18 +412,6 @@ const beDir = (legs, fut, F, b, comm) => {
   return expPnl(legs, fut, b + side * 3, comm) < expPnl(legs, fut, b - side * 3, comm)
     ? "down" : "up";
 };
-/* แถว BE แบบจอ PC: ลูกศรบอกว่าผ่านจุดนั้นแล้ว P/L ขึ้นหรือลง (↑ ขึ้น · ↓ ลง) */
-function beLine(be, F, legs, fut, comm) {
-  if (!be || !be.length) return "";
-  const below = be.filter((b) => b < F), above = be.filter((b) => b > F);
-  const lo = below.length ? Math.max(...below) : 0, hi = above.length ? Math.min(...above) : 0;
-  const one = (v) => {
-    if (!v) return "";
-    const d = legs ? beDir(legs, fut, F, v, comm) : "";
-    return (d === "up" ? "↑" : d === "down" ? "↓" : "") + fmt(v, 1);
-  };
-  return "BE " + [one(lo), one(hi)].filter(Boolean).join(" ");
-}
 function histGreeks(legs, fut, F, T) {
   const f = fut && fut.length === 4 ? fut : [0, 0, 0, 0];
   let dlt = 0, gmm = 0, veg = 0, tht = 0;
@@ -491,6 +484,40 @@ function tableHTML(rows, tfex, atm) {
   }
   return out.join("");
 }
+/* เปิดมาแล้วต้องเห็นโซน ATM ทันทีเหมือนจอ PC (ที่ตั้ง focus ไว้ที่ ATM) — ไม่ใช่ให้ผู้ใช้
+   เลื่อนหาเองจากบนสุด · เผื่อไม่มีแถว ATM (พอร์ตอยู่ปีกเดียว) ใช้แถวที่ใกล้ ATM ที่สุด */
+/* สีตามจอ PC: ค่า greek บวก = เขียว · ลบ = แดง (ทุกตัว รวม M2M) ·
+   BE ลงสีเฉพาะ "ลูกศร" (↓ แดง = short vol · ↑ เขียว = long vol) ตัวเลขคงสีปกติ
+   — ดู PositionSummary.tsx ฟังก์ชัน BE() ที่จอ PC ใช้ */
+const gv = (v, d) => '<b class="' + cls(v) + '">' + fmt(v, d) + "</b>";
+const greekLine = (g) => "Δ " + gv(g.delta) + " Γ " + gv(g.gamma) + " V " + gv(g.vega)
+  + " Θ " + gv(g.theta);
+function beHTML(lower, loDir, upper, hiDir) {
+  const one = (v, d) => {
+    if (!v) return "";
+    const a = d === "down" ? "↓" : d === "up" ? "↑" : "";
+    return (a ? '<span class="' + (d === "down" ? "neg" : "pos") + '">' + a + "</span>" : "")
+      + fmt(v, 1);
+  };
+  const parts = [one(lower, loDir), one(upper, hiDir)].filter(Boolean);
+  return parts.length ? "BE " + parts.join(" ") : "";
+}
+
+function focusATM(boxId, atm) {
+  const box = $(boxId);
+  if (!box) return;
+  const rows = [...box.querySelectorAll("tr")].slice(1);
+  let best = null, bd = Infinity;
+  for (const tr of rows) {
+    const k = Number((tr.children[2] || {}).textContent);
+    if (!Number.isFinite(k)) continue;
+    const d = Math.abs(k - atm);
+    if (d < bd) { bd = d; best = tr; }
+  }
+  if (!best) return;
+  box.scrollTop = Math.max(0, best.offsetTop - box.clientHeight / 2 + best.clientHeight / 2);
+}
+
 function positionTables(rec, F, final) {
   const ents = rec.entries || [];
   const atm = Math.round(F / STEP) * STEP;
@@ -547,13 +574,11 @@ function positionTables(rec, F, final) {
   const cA = (rec.counts || {}).asOf || { orders: ents.length, cons: Math.round(rec.cons || 0) };
   const g = rec.greeks || {};
   const netA = recM2M(rec);
-  const aArrow = (v, d) => (v ? (d === "up" ? "↑" : d === "down" ? "↓" : "") + fmt(v, 1) : "");
-  const aBe = [aArrow(g.beLower, g.beLoDir), aArrow(g.beUpper, g.beHiDir)].filter(Boolean).join(" ");
+  const aBe = beHTML(g.beLower, g.beLoDir, g.beUpper, g.beHiDir);
   $("asofsum").innerHTML = '<div class="sum">' + cA.orders + " orders | " + cA.cons + " cons<br>"
-    + 'M2M <b class="' + cls(netA) + '">' + fmt(netA) + "</b> · Δ " + fmt(g.delta)
-    + " Γ " + fmt(g.gamma) + " V " + fmt(g.vega) + " Θ " + fmt(g.theta)
-    + (aBe ? "<br>BE " + aBe : "") + "</div>";
+    + "M2M " + gv(netA) + " · " + greekLine(g) + (aBe ? "<br>" + aBe : "") + "</div>";
   $("tblcard").hidden = ents.length === 0;
+  focusATM("tbox1", atm);
 
   // M2M ฝั่ง Traded = (มาร์คของวันนั้น − ราคาที่เทรด) × qty (มาร์คชุดเดียวกับ As-of) − คอม
   let tM2M = 0;
@@ -570,13 +595,17 @@ function positionTables(rec, F, final) {
   const tl = rec.todayLegs || [], tf = rec.todayFut || [0, 0, 0, 0];
   const tg = histGreeks(tl, tf, F, rec.T || 0);
   const tbe = beFromLegs(tl, tf, F, tComm);
+  const tLo = tbe.filter((v) => v < F), tHi = tbe.filter((v) => v > F);
+  const tbeHTML = beHTML(tLo.length ? Math.max(...tLo) : 0,
+                         beDir(tl, tf, F, tLo.length ? Math.max(...tLo) : 0, tComm),
+                         tHi.length ? Math.min(...tHi) : 0,
+                         beDir(tl, tf, F, tHi.length ? Math.min(...tHi) : 0, tComm));
   $("tradedsum").innerHTML = '<div class="sum">' + tDeals.length + " orders | "
-    + Math.round(rec.todayCons || 0) + ' cons<br>M2M <b class="' + cls(tM2M - tComm) + '">'
-    + fmt(tM2M - tComm) + "</b> · Δ " + fmt(tg.delta) + " Γ " + fmt(tg.gamma)
-    + " V " + fmt(tg.vega) + " Θ " + fmt(tg.theta)
-    + "<br>" + beLine(tbe, F, tl, tf, tComm) + "</div>";
+    + Math.round(rec.todayCons || 0) + " cons<br>M2M " + gv(tM2M - tComm) + " · " + greekLine(tg)
+    + (tbeHTML ? "<br>" + tbeHTML : "") + "</div>";
   $("tradedcard").hidden = tDeals.length === 0;
   $("tblcard").hidden = false;
+  focusATM("tbox2", atm);
   renderDeals(tDeals);
 }
 
@@ -667,9 +696,8 @@ function renderLive(a) {
   $("nettitle").textContent = "Net M2M (สด · หลังหักคอม)";
   $("net").textContent = fmt(gA.m2m);
   $("net").className = "big " + cls(gA.m2m);
-  $("netsub").textContent = `Δ ${fmt(gA.delta)} Γ ${fmt(gA.gamma)} V ${fmt(gA.vega)} Θ ${fmt(gA.theta)}`;
-  $("besub").textContent = (gA.be || []).length
-    ? "BE " + gA.be.map((v) => fmt(v, 1)).join(" / ") : "";
+  $("netsub").innerHTML = greekLine(gA);
+  $("besub").innerHTML = beHTML(gA.beLower, gA.beLoDir, gA.beUpper, gA.beHiDir);
   $("totcard").hidden = false;
 
   const aPts = ptsOf(pf.asOf), tPts = ptsOf(pf.today);
@@ -685,24 +713,22 @@ function renderLive(a) {
     $("todaycard").hidden = false;
   } else { $("todaycard").hidden = true; }
 
-  const arrow = (v, d) => (v ? (d === "up" ? "↑" : d === "down" ? "↓" : "") + fmt(v, 1) : "");
-  const beRow = (g) => [arrow(g.beLower, g.beLoDir), arrow(g.beUpper, g.beHiDir)]
-    .filter(Boolean).join(" ");
+  const beRow = (g) => beHTML(g.beLower, g.beLoDir, g.beUpper, g.beHiDir);
   $("marklbl").textContent = "live (mid/smile)";
   $("tbl").innerHTML = tableHTML(rowsOf(po.asOf || {}), ((po.asOf || {}).tfex || {}).callN, atm);
   $("asofsum").innerHTML = '<div class="sum">' + ((cnt.asOf || {}).orders || 0) + " orders | "
-    + ((cnt.asOf || {}).cons || 0) + ' cons<br>M2M <b class="' + cls(gA.m2m) + '">' + fmt(gA.m2m)
-    + "</b> · Δ " + fmt(gA.delta) + " Γ " + fmt(gA.gamma) + " V " + fmt(gA.vega)
-    + " Θ " + fmt(gA.theta) + (beRow(gA) ? "<br>BE " + beRow(gA) : "") + "</div>";
+    + ((cnt.asOf || {}).cons || 0) + " cons<br>M2M " + gv(gA.m2m) + " · " + greekLine(gA)
+    + (beRow(gA) ? "<br>" + beRow(gA) : "") + "</div>";
   $("tblcard").hidden = false;
+  focusATM("tbox1", atm);
 
   const tRows = rowsOf(po.today || {});
   $("tbl2").innerHTML = tableHTML(tRows, ((po.today || {}).tfex || {}).callN, atm);
   $("tradedsum").innerHTML = '<div class="sum">' + ((cnt.today || {}).orders || 0) + " orders | "
-    + ((cnt.today || {}).cons || 0) + ' cons<br>M2M <b class="' + cls(gT.m2m) + '">' + fmt(gT.m2m)
-    + "</b> · Δ " + fmt(gT.delta) + " Γ " + fmt(gT.gamma) + " V " + fmt(gT.vega)
-    + " Θ " + fmt(gT.theta) + (beRow(gT) ? "<br>BE " + beRow(gT) : "") + "</div>";
+    + ((cnt.today || {}).cons || 0) + " cons<br>M2M " + gv(gT.m2m) + " · " + greekLine(gT)
+    + (beRow(gT) ? "<br>" + beRow(gT) : "") + "</div>";
   $("tradedcard").hidden = tRows.length === 0;
+  focusATM("tbox2", atm);
   renderDeals(liveDeals(po.today || {}));
 }
 
