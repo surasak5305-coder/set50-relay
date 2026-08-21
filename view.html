@@ -45,9 +45,18 @@
   .tot td { border-top:1px solid var(--line); font-weight:600; }
   .tot td[colspan] { text-align:left; white-space:normal; }
   td.mut { color:#3c5169; }
-  td.nk, th.nk { color:#8fb3d9; width:15%; }            /* N = naked (futures-equivalent) */
+  td.nk, th.nk { width:15%; }                           /* N = naked (futures-equivalent) */
   th.k, td.k { width:22%; }
   .sum { margin-top:6px; border-top:1px solid var(--line); padding-top:6px; }
+  /* จอแคบ (มือถือแนวตั้ง) = เรียงลงมาเหมือนเดิม — 10 คอลัมน์ใน 390px อ่านไม่ออก
+     จอกว้างพอ (หมุนมือถือแนวนอน / แท็บเล็ต / เปิดบนคอม) = วางแบบจอ PC:
+     กราฟ Payoff ซ้าย · Position Summary ขวา */
+  .cols { display:block; }
+  @media (min-width:760px) {
+    body { max-width:1180px; margin:0 auto; }
+    .cols { display:grid; grid-template-columns:1fr 1fr; gap:10px; align-items:start; }
+    svg { height:230px; }
+  }
   tr.atm td { background:#182c3f; }
   #err { color:var(--red); white-space:pre-wrap; }
   button, select { background:#1d3040; color:var(--tx); border:1px solid var(--line);
@@ -107,6 +116,8 @@
   <div class="dim" id="netsub"></div>
   <div class="dim" id="besub"></div>
 </div>
+<div class="cols">
+<div>
 <div class="card" id="paycard" hidden>
   <div class="dim" style="margin-bottom:4px">Payoff · As of Today — expiry (solid) · T+0 (dashed)</div>
   <svg id="pay" preserveAspectRatio="none"></svg>
@@ -117,6 +128,8 @@
   <svg id="todaypay" preserveAspectRatio="none"></svg>
   <div class="dim" id="todaysub"></div>
 </div>
+</div>
+<div>
 <div class="card" id="tblcard" hidden>
   <div class="dim" style="margin-bottom:4px">Position Summary · <b>As of Today</b>
     — marks at <span id="marklbl"></span></div>
@@ -140,6 +153,8 @@
     <span class="dim" id="setupmsg"></span>
   </div>
   <div id="setuplist"></div>
+</div>
+</div>
 </div>
 <div class="card"><button onclick="location.reload()">Refresh</button>
   <span class="dim" id="err"></span></div>
@@ -305,6 +320,90 @@ function render(d) {
   positionTables(rec, F, final);
 }
 
+/* greeks + breakeven ของ "ฝั่ง Traded" — ฝั่ง As-of ใช้ค่าที่เครื่องเทรดแช่ไว้ใน snapshot
+   แต่ฝั่ง Traded ไม่ได้แช่ไว้ ⇒ คิดใหม่จาก todayLegs ด้วยสูตรเดียวกับ dashboard_data
+   (_hist_greeks / _be_from_legs / _be_dir_of) แล้วเทียบเลขกับเครื่องเทรดตอนเทส */
+const npdf = (x) => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+function b76(F, K, T, sigma, cp) {
+  if (T <= 0 || sigma <= 0) {
+    const intr = Math.max(0, cp === "C" ? F - K : K - F) * Math.exp(-R * T);
+    return { price: intr, delta: 0, gamma: 0, vega: 0, theta: 0 };
+  }
+  const vt = sigma * Math.sqrt(T);
+  const d1 = (Math.log(F / K) + 0.5 * sigma * sigma * T) / vt, d2 = d1 - vt;
+  const dfr = Math.exp(-R * T), nd1 = npdf(d1);
+  const price = cp === "C" ? dfr * (F * N(d1) - K * N(d2)) : dfr * (K * N(-d2) - F * N(-d1));
+  return {
+    price: price,
+    delta: cp === "C" ? dfr * N(d1) : -dfr * N(-d1),
+    gamma: dfr * nd1 / (F * vt),
+    vega: F * dfr * nd1 * Math.sqrt(T),
+    theta: -F * dfr * nd1 * sigma / (2 * Math.sqrt(T)) - R * price,
+  };
+}
+// P/L ณ วันหมดอายุ (intrinsic ล้วน ไม่เรียก B76) ที่ราคา S หักคอมรวมแล้ว
+function expPnl(legs, fut, S, comm) {
+  const f = fut && fut.length === 4 ? fut : [0, 0, 0, 0];
+  let e = 0;
+  for (const lg of legs) {
+    const intr = Math.max(0, lg[1] === "C" ? S - lg[0] : lg[0] - S);
+    e += (intr - lg[3]) * lg[2] - (intr - lg[5]) * lg[4];
+  }
+  if (f[0] > 1e-9 || f[2] > 1e-9) e += (S - f[1]) * f[0] - (S - f[3]) * f[2];
+  return e - comm;
+}
+/* เส้น expiry เป็น piecewise-linear หักมุมเฉพาะที่ strike ⇒ ประเมินแค่ที่ strike + ขอบ F±400
+   แล้ว interpolate ตรงช่วง = แม่นและถูก (ไม่ต้องสแกนถี่) — สูตรเดียวกับ _be_from_legs */
+function beFromLegs(legs, fut, F, comm) {
+  const f = fut && fut.length === 4 ? fut : [0, 0, 0, 0];
+  if (!legs.length && f[0] < 1e-9 && f[2] < 1e-9) return [];
+  const ks = [...new Set(legs.map((l) => l[0]))].sort((a, b) => a - b);
+  const all = [...new Set([Math.min(...ks.concat([F])) - 400, ...ks,
+                           Math.max(...ks.concat([F])) + 400])].sort((a, b) => a - b);
+  const es = all.map((x) => expPnl(legs, f, x, comm));
+  const out = [];
+  const r1 = (v) => Math.round(v * 10) / 10;
+  for (let i = 1; i < all.length; i++) {
+    const a = all[i - 1], ea = es[i - 1], b = all[i], eb = es[i];
+    if (ea === 0) out.push(r1(a));
+    else if (eb !== 0 && (ea < 0) !== (eb < 0)) out.push(r1(a + (b - a) * (-ea) / (eb - ea)));
+  }
+  if (es.length && es[es.length - 1] === 0) out.push(r1(all[all.length - 1]));
+  const ded = [];
+  for (const v of out) if (!ded.length || Math.abs(ded[ded.length - 1] - v) > 0.05) ded.push(v);
+  return ded;
+}
+const beDir = (legs, fut, F, b, comm) => {
+  if (!b) return "";
+  const side = b > F ? 1 : -1;
+  return expPnl(legs, fut, b + side * 3, comm) < expPnl(legs, fut, b - side * 3, comm)
+    ? "down" : "up";
+};
+/* แถว BE แบบจอ PC: ลูกศรบอกว่าผ่านจุดนั้นแล้ว P/L ขึ้นหรือลง (↑ ขึ้น · ↓ ลง) */
+function beLine(be, F, legs, fut, comm) {
+  if (!be || !be.length) return "";
+  const below = be.filter((b) => b < F), above = be.filter((b) => b > F);
+  const lo = below.length ? Math.max(...below) : 0, hi = above.length ? Math.min(...above) : 0;
+  const one = (v) => {
+    if (!v) return "";
+    const d = legs ? beDir(legs, fut, F, v, comm) : "";
+    return (d === "up" ? "↑" : d === "down" ? "↓" : "") + fmt(v, 1);
+  };
+  return "BE " + [one(lo), one(hi)].filter(Boolean).join(" ");
+}
+function histGreeks(legs, fut, F, T) {
+  const f = fut && fut.length === 4 ? fut : [0, 0, 0, 0];
+  let dlt = 0, gmm = 0, veg = 0, tht = 0;
+  for (const lg of legs) {
+    const r = b76(F, lg[0], T, lg[6], lg[1]);
+    const n = lg[2] - lg[4];
+    dlt += r.delta * n; gmm += r.gamma * n;
+    veg += (r.vega / 100) * n; tht += (r.theta / 365) * n;
+  }
+  dlt += f[0] - f[2];                       // futures: Δ=1/สัญญา · Γ/Vega/Θ = 0
+  return { delta: dlt, gamma: gmm, vega: veg, theta: tht };
+}
+
 /* ── Position Summary แบบเดียวกับจอ PC ────────────────────────────────────────
    พอร์ตมาจาก dashboard_data._hist_position_tables: ตาราง As-of สร้างจาก entries ·
    ตาราง Traded สร้างจาก todayDeals · คอลัมน์ N = "naked" = ความชันของเส้น payoff ที่
@@ -348,7 +447,8 @@ function displayStrikes(posKeys, F, target) {
   return strikes.sort((a, b) => a - b);
 }
 function tableHTML(rows, tfex, atm) {
-  const cell = (v, c) => (v ? '<td class="' + (c || "") + '">' + v + "</td>"
+  // สีเดียวกับจอ PC: บวก (long) เขียว · ลบ (short) แดง — ดูออกทันทีว่าถือฝั่งไหน
+  const cell = (v, c) => (v ? '<td class="' + (c || "") + " " + cls(v) + '">' + v + "</td>"
                             : '<td class="mut">·</td>');
   const out = ['<tr><th class="nk">N</th><th>C</th><th class="k">Strike</th><th>P</th>'
                + '<th class="nk">N</th></tr>'];
@@ -419,9 +519,12 @@ function positionTables(rec, F, final) {
   const cA = (rec.counts || {}).asOf || { orders: ents.length, cons: Math.round(rec.cons || 0) };
   const g = rec.greeks || {};
   const netA = rec.m2mSettle != null ? rec.m2mSettle : rec.m2m;
+  const aArrow = (v, d) => (v ? (d === "up" ? "↑" : d === "down" ? "↓" : "") + fmt(v, 1) : "");
+  const aBe = [aArrow(g.beLower, g.beLoDir), aArrow(g.beUpper, g.beHiDir)].filter(Boolean).join(" ");
   $("asofsum").innerHTML = '<div class="sum">' + cA.orders + " orders | " + cA.cons + " cons<br>"
     + 'M2M <b class="' + cls(netA) + '">' + fmt(netA) + "</b> · Δ " + fmt(g.delta)
-    + " Γ " + fmt(g.gamma) + " V " + fmt(g.vega) + " Θ " + fmt(g.theta) + "</div>";
+    + " Γ " + fmt(g.gamma) + " V " + fmt(g.vega) + " Θ " + fmt(g.theta)
+    + (aBe ? "<br>BE " + aBe : "") + "</div>";
   $("tblcard").hidden = ents.length === 0;
 
   // M2M ฝั่ง Traded = (มาร์คของวันนั้น − ราคาที่เทรด) × qty (มาร์คชุดเดียวกับ As-of) − คอม
@@ -435,9 +538,15 @@ function positionTables(rec, F, final) {
   }
   const tComm = (rec.todayCons || 0) * (rec.commPt || 0);
   $("tbl2").innerHTML = tableHTML(tRows, tFutNet, atm);
+  // greeks/BE ฝั่ง Traded ไม่ได้แช่ไว้ใน snapshot ⇒ คิดจาก todayLegs ด้วยสูตรเดียวกับจอ PC
+  const tl = rec.todayLegs || [], tf = rec.todayFut || [0, 0, 0, 0];
+  const tg = histGreeks(tl, tf, F, rec.T || 0);
+  const tbe = beFromLegs(tl, tf, F, tComm);
   $("tradedsum").innerHTML = '<div class="sum">' + tDeals.length + " orders | "
     + Math.round(rec.todayCons || 0) + ' cons<br>M2M <b class="' + cls(tM2M - tComm) + '">'
-    + fmt(tM2M - tComm) + "</b> (มาร์ควันนั้น − ราคาที่เทรด − คอม " + fmt(tComm) + ")</div>";
+    + fmt(tM2M - tComm) + "</b> · Δ " + fmt(tg.delta) + " Γ " + fmt(tg.gamma)
+    + " V " + fmt(tg.vega) + " Θ " + fmt(tg.theta)
+    + "<br>" + beLine(tbe, F, tl, tf, tComm) + "</div>";
   $("tradedcard").hidden = tDeals.length === 0;
 }
 
