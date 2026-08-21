@@ -192,11 +192,48 @@ function ghErr(status) {
   return "github HTTP " + status;
 }
 
+/* Token expiry — GitHub returns it on EVERY API response for a fine-grained token
+ * (`github-authentication-token-expiration`), so we never have to be told the date:
+ * whatever token is in the env announces its own deadline. Warn 7 days ahead, on the
+ * phone and on the trading dashboard, so it never dies mid-week without notice. */
+let tokExp = "";                            // "2027-07-31 17:00:00 UTC" ("" = unknown)
+let tokSeenAt = 0;                          // when the header last told us
+const TOK_REFRESH_MS = 6 * 3600 * 1000;
+
+function tokenStatus() {
+  if (!GH_TOKEN) return { ok: false, error: "RELAY_GH_TOKEN not set", level: "crit" };
+  if (!tokExp) return { ok: true, exp: null, days: null, level: "ok" };   // no expiry reported
+  const ms = Date.parse(tokExp.replace(" UTC", "Z").replace(" ", "T")) - Date.now();
+  const days = Math.floor(ms / 86400000);
+  return { ok: true, exp: tokExp.slice(0, 10), days,
+           level: days < 0 ? "crit" : days <= 7 ? "warn" : "ok" };
+}
+
+/* headers so the phone learns the deadline from the call it was making anyway
+   (no extra request, no extra GitHub call, nothing to poll) */
+function tokenHeaders() {
+  const t = tokenStatus();
+  return t.days == null ? {} : { "X-Token-Exp": t.exp, "X-Token-Days": String(t.days) };
+}
+
+/* Nothing here calls GitHub on a schedule: this only runs when the relay is ALREADY
+   awake serving someone (the free-hours meter counts time awake, not requests), and
+   at most once every 6 h. */
+function tokenRefresh() {
+  if (!GH_TOKEN || Date.now() - tokSeenAt < TOK_REFRESH_MS) return;
+  tokSeenAt = Date.now();                   // set first: a failing call must not retry in a loop
+  ghGet("").catch(() => {});                // ghGet records the header itself
+}
+
 /* one GitHub Contents API call (private repo -> needs the token) */
 function ghGet(p, raw) {
   return fetch("https://api.github.com/repos/" + GH_REPO + p, {
     headers: { "Authorization": "Bearer " + GH_TOKEN, "User-Agent": "set50-relay",
       "Accept": raw ? "application/vnd.github.raw+json" : "application/vnd.github+json" },
+  }).then((r) => {
+    const h = r.headers.get("github-authentication-token-expiration");
+    if (h) { tokExp = h; tokSeenAt = Date.now(); }
+    return r;
   });
 }
 
@@ -210,7 +247,7 @@ const ACCTS_TTL = 5 * 60 * 1000;
 async function accountsHandler(res) {
   if (!GH_TOKEN) return sendJSON(res, 500, { ok: false, error: "RELAY_GH_TOKEN not set" });
   if (acctsCache.res && Date.now() - acctsCache.at < ACCTS_TTL) {
-    return sendJSON(res, 200, acctsCache.res);
+    return sendJSON(res, 200, acctsCache.res, tokenHeaders());
   }
   try {
     const r = await ghGet("/contents/mobile?ref=main");
@@ -237,7 +274,7 @@ async function accountsHandler(res) {
     accounts.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : a.acct < b.acct ? -1 : 1));
     acctsCache.res = { ok: true, accounts };
     acctsCache.at = Date.now();
-    return sendJSON(res, 200, acctsCache.res);
+    return sendJSON(res, 200, acctsCache.res, tokenHeaders());
   } catch (e) {
     return sendJSON(res, 502, { ok: false, error: String(e.message || e) });
   }
@@ -247,7 +284,7 @@ async function bundleHandler(res, acct) {
   if (!VALID_ID.test(acct)) return sendJSON(res, 400, { ok: false, error: "bad acct" });
   if (!GH_TOKEN) return sendJSON(res, 500, { ok: false, error: "RELAY_GH_TOKEN not set" });
   const c = bundleCache[acct];
-  if (c && Date.now() - c.at < 60 * 1000) return sendJSON(res, 200, c.res);
+  if (c && Date.now() - c.at < 60 * 1000) return sendJSON(res, 200, c.res, tokenHeaders());
   try {
     const r = await fetch("https://api.github.com/repos/" + GH_REPO + "/contents/mobile/" +
       encodeURIComponent(acct) + ".json?ref=main", {
@@ -258,7 +295,7 @@ async function bundleHandler(res, acct) {
     if (r.status !== 200) return sendJSON(res, 502, { ok: false, error: ghErr(r.status) });
     const out = await r.json();
     bundleCache[acct] = { res: out, at: Date.now() };
-    return sendJSON(res, 200, out);
+    return sendJSON(res, 200, out, tokenHeaders());
   } catch (e) {
     return sendJSON(res, 502, { ok: false, error: String(e.message || e) });
   }
@@ -305,6 +342,11 @@ const server = http.createServer((req, res) => {
     if (!authed(req, u)) return sendJSON(res, 401, { ok: false, error: "unauthorized" });
     return void bundleHandler(res, String(u.searchParams.get("acct") || ""));
   }
+  if (req.method === "GET" && u.pathname === "/api/token") {
+    if (!authed(req, u)) return sendJSON(res, 401, { ok: false, error: "unauthorized" });
+    tokenRefresh();                          // เผื่อไม่มีใครแตะ GitHub มานาน (ไม่รอผล)
+    return sendJSON(res, 200, tokenStatus());
+  }
   if (req.method === "GET" && u.pathname === "/api/accounts") {
     if (!authed(req, u)) return sendJSON(res, 401, { ok: false, error: "unauthorized" });
     return void accountsHandler(res);
@@ -344,7 +386,10 @@ const server = http.createServer((req, res) => {
 
   // health/status (no key needed, leaks nothing but a count)
   if (req.method === "GET" && u.pathname === "/") {
-    return sendJSON(res, 200, { ok: true, service: "set50-relay", accounts: readFolder().accounts.length });
+    // health = จุดที่เครื่องเทรด ping อยู่แล้ว → พ่วงวันหมดอายุ token ไปด้วย ได้ฟรีไม่ต้องยิงเพิ่ม
+    tokenRefresh();
+    return sendJSON(res, 200, { ok: true, service: "set50-relay",
+      accounts: readFolder().accounts.length, token: tokenStatus() });
   }
 
   sendJSON(res, 404, { ok: false, error: "not found" });
