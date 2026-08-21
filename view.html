@@ -48,6 +48,13 @@
   td.nk, th.nk { width:15%; }                           /* N = naked (futures-equivalent) */
   th.k, td.k { width:22%; }
   .sum { margin-top:6px; border-top:1px solid var(--line); padding-top:6px; }
+  /* Orders ของวันนั้น — พับเก็บได้ บางวันมีหลายสิบดีล ไม่ควรดันการ์ดอื่นตกจอ (เหมือนจอ PC) */
+  .deal-head { width:100%; text-align:left; background:transparent; border:0; padding:0;
+               color:var(--dim); font-size:12px; }
+  .deals { margin-top:8px; display:flex; flex-wrap:wrap; gap:6px 10px; }
+  .deal { font-size:12px; font-variant-numeric:tabular-nums; white-space:nowrap;
+          background:#0f1a26; border:1px solid var(--line); border-radius:6px; padding:2px 6px; }
+  .deal b { font-weight:600; }
   /* จอแคบ (มือถือแนวตั้ง) = เรียงลงมาเหมือนเดิม — 10 คอลัมน์ใน 390px อ่านไม่ออก
      จอกว้างพอ (หมุนมือถือแนวนอน / แท็บเล็ต / เปิดบนคอม) = วางแบบจอ PC:
      กราฟ Payoff ซ้าย · Position Summary ขวา */
@@ -140,6 +147,10 @@
   <div class="dim" style="margin-bottom:4px">Position Summary · <b>Traded</b> — ดีลของวันนั้น</div>
   <table id="tbl2"></table>
   <div class="dim" id="tradedsum"></div>
+</div>
+<div class="card" id="dealcard" hidden>
+  <button id="dealhead" class="deal-head"></button>
+  <div id="deals" class="deals" hidden></div>
 </div>
 <div class="card" id="setup" hidden>
   <div class="dim" style="margin-bottom:6px">
@@ -548,6 +559,29 @@ function positionTables(rec, F, final) {
     + " V " + fmt(tg.vega) + " Θ " + fmt(tg.theta)
     + "<br>" + beLine(tbe, F, tl, tf, tComm) + "</div>";
   $("tradedcard").hidden = tDeals.length === 0;
+  renderDeals(tDeals);
+}
+
+/* Orders ที่ยิงในวันที่กำลังย้อนดู (ดีลดิบที่แช่ไว้กับ snapshot ตอน M2M Save) — บวก=ซื้อ ลบ=ขาย
+   พับเก็บไว้ก่อนเหมือนจอ PC เพราะบางวันหลายสิบดีล */
+function renderDeals(deals) {
+  $("dealcard").hidden = !deals.length;
+  if (!deals.length) return;
+  const ct = deals.reduce((a, d) => a + Math.abs(Number(d.qty) || 0), 0);
+  const box = $("deals");
+  box.hidden = true;
+  $("dealhead").innerHTML = "▸ Orders · " + deals.length + " deal" + (deals.length > 1 ? "s" : "")
+    + " · " + ct + " ct";
+  box.innerHTML = deals.map((d) => {
+    const q = Number(d.qty) || 0;
+    return '<span class="deal">' + esc(d.leg) + ' <b class="' + cls(q) + '">'
+      + (q > 0 ? "+" : "") + q + "</b> @ " + fmt(d.price, 1) + "</span>";
+  }).join("");
+  $("dealhead").onclick = () => {
+    box.hidden = !box.hidden;
+    $("dealhead").innerHTML = (box.hidden ? "▸" : "▾") + " Orders · " + deals.length
+      + " deal" + (deals.length > 1 ? "s" : "") + " · " + ct + " ct";
+  };
 }
 
 
