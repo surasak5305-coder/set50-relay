@@ -352,20 +352,27 @@ function render(d) {
   // As-of: ปกติใช้เส้นที่เครื่องเทรดคำนวณไว้แล้ว (ตรงกับจอ PC แน่นอน) — ขอช่วงอื่นเมื่อไหร่
   // ค่อยคิดใหม่จาก legs ที่แช่มาด้วยสูตรเดียวกัน (ตรวจแล้วตรงกับเส้นที่แช่ไว้ทุกจุด)
   const snap = (rec.pts || []).map((q) => (Array.isArray(q) ? q : [q.price, q.exp, q.now]));
-  if (snap.length) { RAUTO = { lo: snap[0][0], hi: snap[snap.length - 1][0] }; }
+  const full = snap.length ? { lo: snap[0][0], hi: snap[snap.length - 1][0] } : { lo: 0, hi: 0 };
   const commA = (rec.cons || 0) * (rec.commPt || 0);
-  const wantRange = RLO && RHI && RHI > RLO
-    && (RLO !== RAUTO.lo || RHI !== RAUTO.hi);
-  const grid = wantRange ? priceGrid(RLO, RHI, F) : null;
-  const pts = wantRange
-    ? payoffPoints(rec.legs || [], rec.fut || [0, 0, 0, 0], grid, T, commA)
-    : snap;
+  // snapshot รุ่นเก่าบางวันไม่มี greeks.be ติดมาด้วย → คิดจากขาที่แช่ไว้ ไม่งั้นวันนั้นจะตกไป
+  // ใช้ช่วงเต็ม (กว้างเกินไป) ทั้งที่ข้อมูลพอคิด BE ได้
+  const beList = (g.be && g.be.length) ? g.be
+    : beFromLegs(rec.legs || [], rec.fut || [0, 0, 0, 0], F, commA);
+  RAUTO = autoRange(beList, F, full.lo, full.hi);
+  const lo = RLO || RAUTO.lo, hi = RHI || RAUTO.hi;
+  // ใช้เส้นที่แช่ไว้ตรง ๆ เฉพาะตอนช่วงตรงกับกริดเดิมเป๊ะ — นอกนั้นคิดใหม่จาก legs
+  // (สูตรเดียวกับจอ PC · ตรวจแล้วเส้นที่คิดใหม่ตรงกับเส้นที่แช่ไว้ทุกจุดร่วม)
+  const sameAsSnap = snap.length && lo === full.lo && hi === full.hi;
+  const pts = sameAsSnap
+    ? snap
+    : payoffPoints(rec.legs || [], rec.fut || [0, 0, 0, 0], priceGrid(lo, hi, F), T, commA);
   drawPayoff($("pay"), pts, F, g.be || []);
   $("paysub").textContent = pts.length
     ? `range ${fmt(pts[0][0], 0)}–${fmt(pts[pts.length - 1][0], 0)} · P/L at F ${fmt(atF(pts, F))}`
     : "snapshot นี้ไม่มีเส้นกราฟ";
   $("paycard").hidden = false;
-  rangeUI(wantRange ? "คิดเส้นใหม่จากขาที่แช่ไว้ (สูตรเดียวกับจอ PC)" : "");
+  rangeUI(RLO || RHI ? "ตั้งช่วงเอง — กด Auto เพื่อกลับไป BE ±40"
+                     : "Auto = BE ซ้ายสุด/ขวาสุด ±40 จุด");
 
   // Today: ดีลของวันนั้นล้วน ๆ — snapshot ไม่ได้เก็บเส้นไว้ จึงคิดจาก todayLegs ตรงนี้
   const tLegs = rec.todayLegs || [], tFut = rec.todayFut || [0, 0, 0, 0];
@@ -518,6 +525,21 @@ function tableHTML(rows, tfex, atm) {
 }
 /* เปิดมาแล้วต้องเห็นโซน ATM ทันทีเหมือนจอ PC (ที่ตั้ง focus ไว้ที่ ATM) — ไม่ใช่ให้ผู้ใช้
    เลื่อนหาเองจากบนสุด · เผื่อไม่มีแถว ATM (พอร์ตอยู่ปีกเดียว) ใช้แถวที่ใกล้ ATM ที่สุด */
+/* โหมด Auto ของช่วงแกน X = จาก BE ซ้ายสุดถึง BE ขวาสุด บวกข้างละ 40 จุด (ผู้ใช้กำหนด
+   2026-08-21) — ช่วงเต็มของ snapshot (870-1190) กว้างเกินจนโซนที่สนใจจริงถูกบีบอยู่กลางจอ
+   ปัดลงเป็นหลักสิบให้ป้ายราคาออกมาเป็นเลขกลม · ไม่มี BE เลย (พอร์ตกำไร/ขาดทุนทั้งเส้น)
+   → ใช้ช่วงเต็มตามเดิม · F ต้องอยู่ในกรอบเสมอ ไม่งั้นเส้นประราคาปัจจุบันหลุดจอ */
+const BE_PAD = 40;
+function autoRange(be, F, fullLo, fullHi) {
+  const xs = (be || []).filter((v) => Number.isFinite(v) && v > 0);
+  if (!xs.length) return { lo: fullLo, hi: fullHi };
+  let lo = Math.min(...xs) - BE_PAD, hi = Math.max(...xs) + BE_PAD;
+  if (F) { lo = Math.min(lo, F - BE_PAD); hi = Math.max(hi, F + BE_PAD); }
+  lo = Math.floor(lo / 10) * 10; hi = Math.ceil(hi / 10) * 10;
+  if (fullLo && fullHi) { lo = Math.max(lo, fullLo); hi = Math.min(hi, fullHi); }
+  return { lo: lo, hi: hi };
+}
+
 /* กริดราคาสำหรับคิดเส้นใหม่ — ก้าว 5 จุดเท่ากับที่ snapshot ใช้ และใส่ F เข้าไปเสมอ
    (ตัวเลข "P/L at F" ต้องอ่านจากจุดที่ราคาตรง F เป๊ะ ไม่ใช่จุดใกล้ ๆ) */
 function priceGrid(lo, hi, F) {
@@ -544,8 +566,9 @@ function rangeUI(note) {
   $("rnote").textContent = note || "";
 }
 function clipPts(pts) {
-  if (!RLO || !RHI || RHI <= RLO) return pts;
-  const out = pts.filter((q) => q[0] >= RLO && q[0] <= RHI);
+  const lo = RLO || RAUTO.lo, hi = RHI || RAUTO.hi;
+  if (!lo || !hi || hi <= lo) return pts;
+  const out = pts.filter((q) => q[0] >= lo && q[0] <= hi);
   return out.length >= 2 ? out : pts;
 }
 function saveRange() {
@@ -795,9 +818,10 @@ function renderLive(a) {
   $("totcard").hidden = false;
 
   const aFull = ptsOf(pf.asOf), tFull = ptsOf(pf.today);
-  if (aFull.length) RAUTO = { lo: aFull[0][0], hi: aFull[aFull.length - 1][0] };
+  const fLo = aFull.length ? aFull[0][0] : 0, fHi = aFull.length ? aFull[aFull.length - 1][0] : 0;
+  RAUTO = autoRange(gA.be || pf.beAsof, F, fLo, fHi);
   const aPts = clipPts(aFull), tPts = clipPts(tFull);
-  rangeUI("โหมด live ปรับได้เฉพาะซูมเข้าในช่วงที่เครื่องเทรดส่งมา");
+  rangeUI("Auto = BE ±40 · โหมด live ซูมได้เฉพาะในช่วงที่เครื่องเทรดส่งมา");
   drawPayoff($("pay"), aPts, F, gA.be || []);
   $("paysub").textContent = aPts.length
     ? `range ${fmt(aPts[0][0], 0)}–${fmt(aPts[aPts.length - 1][0], 0)}`
