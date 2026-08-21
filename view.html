@@ -56,6 +56,16 @@
   .pos-two th, .pos-two td { padding:2px 1px; font-size:10.5px; }
   .pos-two .sum { font-size:11px; }
   .pos-h { color:var(--tx); font-size:12px; font-weight:600; margin-bottom:2px; }
+  /* ช่วงแกน X ของกราฟ payoff — แถบเดียวกับที่จอ PC มีใต้หน้าต่าง Payoff
+     (Auto · ช่องต่ำ–สูง · − step +) คุมทั้งกราฟ As-of และ Today พร้อมกัน */
+  .rng { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+  .rng input { width:74px; text-align:center; background:#0f1a26; color:var(--tx);
+               border:1px solid var(--line); border-radius:8px; padding:6px 4px; font-size:13px;
+               font-variant-numeric:tabular-nums; }
+  .rng button { padding:6px 10px; }
+  .rstep { display:inline-flex; align-items:center; gap:2px; margin-left:auto; }
+  .rstep button { padding:6px 9px; }
+  #rstepv { min-width:26px; text-align:center; font-size:13px; font-variant-numeric:tabular-nums; }
   /* ระยะ strike เท่าจอ PC: โชว์ ~9 แถวแล้วเลื่อนดูส่วนที่เหลือ โดยเปิดมาให้ ATM อยู่กลางช่อง
      (จอ PC ใช้ช่องเลื่อนสูงเท่านี้ + focus ที่ ATM — ถ้าปล่อยยาวทั้ง 26 แถวจะหาแถวที่สนใจไม่เจอ) */
   .tbox { max-height:186px; overflow-y:auto; overscroll-behavior:contain; }
@@ -151,6 +161,18 @@
 </div>
 </div>
 <div>
+<div class="card" id="rangecard" hidden>
+  <div class="rng">
+    <button id="rauto">Auto</button>
+    <input id="rlo" type="number" inputmode="numeric" step="10">
+    <span class="dim">–</span>
+    <input id="rhi" type="number" inputmode="numeric" step="10">
+    <span class="rstep">
+      <button id="rminus">−</button><span id="rstepv">20</span><button id="rplus">+</button>
+    </span>
+  </div>
+  <div class="dim" id="rnote"></div>
+</div>
 <div class="card" id="tblcard" hidden>
   <div class="dim" style="margin-bottom:6px">Position Summary — marks at <span id="marklbl"></span></div>
   <div class="pos-two">
@@ -327,20 +349,30 @@ function render(d) {
   $("besub").innerHTML = beHTML(g.beLower, g.beLoDir, g.beUpper, g.beHiDir);
   $("totcard").hidden = false;
 
-  // As-of: เส้นที่เครื่องเทรดคำนวณไว้แล้ว (ไม่คิดใหม่ = ตรงกับจอ PC แน่นอน)
-  const pts = (rec.pts || []).map((p) => (Array.isArray(p) ? p : [p.price, p.exp, p.now]));
+  // As-of: ปกติใช้เส้นที่เครื่องเทรดคำนวณไว้แล้ว (ตรงกับจอ PC แน่นอน) — ขอช่วงอื่นเมื่อไหร่
+  // ค่อยคิดใหม่จาก legs ที่แช่มาด้วยสูตรเดียวกัน (ตรวจแล้วตรงกับเส้นที่แช่ไว้ทุกจุด)
+  const snap = (rec.pts || []).map((q) => (Array.isArray(q) ? q : [q.price, q.exp, q.now]));
+  if (snap.length) { RAUTO = { lo: snap[0][0], hi: snap[snap.length - 1][0] }; }
+  const commA = (rec.cons || 0) * (rec.commPt || 0);
+  const wantRange = RLO && RHI && RHI > RLO
+    && (RLO !== RAUTO.lo || RHI !== RAUTO.hi);
+  const grid = wantRange ? priceGrid(RLO, RHI, F) : null;
+  const pts = wantRange
+    ? payoffPoints(rec.legs || [], rec.fut || [0, 0, 0, 0], grid, T, commA)
+    : snap;
   drawPayoff($("pay"), pts, F, g.be || []);
   $("paysub").textContent = pts.length
     ? `range ${fmt(pts[0][0], 0)}–${fmt(pts[pts.length - 1][0], 0)} · P/L at F ${fmt(atF(pts, F))}`
     : "snapshot นี้ไม่มีเส้นกราฟ";
   $("paycard").hidden = false;
+  rangeUI(wantRange ? "คิดเส้นใหม่จากขาที่แช่ไว้ (สูตรเดียวกับจอ PC)" : "");
 
   // Today: ดีลของวันนั้นล้วน ๆ — snapshot ไม่ได้เก็บเส้นไว้ จึงคิดจาก todayLegs ตรงนี้
   const tLegs = rec.todayLegs || [], tFut = rec.todayFut || [0, 0, 0, 0];
   const hasToday = tLegs.length || tFut[0] > 1e-9 || tFut[2] > 1e-9;
   if (hasToday && pts.length) {
     const comm = (rec.todayCons || 0) * (rec.commPt || 0);
-    const tp = payoffPoints(tLegs, tFut, pts.map((p) => p[0]), T, comm);
+    const tp = payoffPoints(tLegs, tFut, pts.map((q) => q[0]), T, comm);
     drawPayoff($("todaypay"), tp, F, []);
     const deals = (rec.todayDeals || []).length;
     $("todaysub").textContent = `P/L at F ${fmt(atF(tp, F))}`
@@ -486,6 +518,47 @@ function tableHTML(rows, tfex, atm) {
 }
 /* เปิดมาแล้วต้องเห็นโซน ATM ทันทีเหมือนจอ PC (ที่ตั้ง focus ไว้ที่ ATM) — ไม่ใช่ให้ผู้ใช้
    เลื่อนหาเองจากบนสุด · เผื่อไม่มีแถว ATM (พอร์ตอยู่ปีกเดียว) ใช้แถวที่ใกล้ ATM ที่สุด */
+/* กริดราคาสำหรับคิดเส้นใหม่ — ก้าว 5 จุดเท่ากับที่ snapshot ใช้ และใส่ F เข้าไปเสมอ
+   (ตัวเลข "P/L at F" ต้องอ่านจากจุดที่ราคาตรง F เป๊ะ ไม่ใช่จุดใกล้ ๆ) */
+function priceGrid(lo, hi, F) {
+  const out = [];
+  for (let v = Math.floor(lo / 5) * 5; v <= hi; v += 5) out.push(v);
+  if (F >= lo && F <= hi && !out.includes(F)) { out.push(F); out.sort((a, b) => a - b); }
+  return out;
+}
+
+/* ── ช่วงแกน X ของกราฟ (แถบ Auto / lo – hi / step) ────────────────────────────────
+   history: snapshot เก็บ legs+fut มาด้วย ⇒ คิดเส้นใหม่ได้ทุกช่วงเหมือนจอ PC (สูตรเดียวกัน)
+   live   : relay ส่งมาแต่จุดที่คำนวณแล้ว (ไม่มี legs) ⇒ ทำได้แค่ "ซูมเข้า" ในช่วงที่ส่งมา
+   ค่าที่ตั้งไว้จำต่อเครื่อง (localStorage) เหมือนจอ PC ที่จำช่วงล่าสุด */
+let RLO = Number(localStorage.getItem("sv_rlo")) || 0;
+let RHI = Number(localStorage.getItem("sv_rhi")) || 0;
+let RSTEP = Number(localStorage.getItem("sv_rstep")) || 20;
+let RAUTO = { lo: 0, hi: 0 };              // ช่วงเต็มของข้อมูลที่มี (ปุ่ม Auto กลับมาที่นี่)
+
+function rangeUI(note) {
+  $("rangecard").hidden = false;
+  $("rlo").value = RLO || Math.round(RAUTO.lo);
+  $("rhi").value = RHI || Math.round(RAUTO.hi);
+  $("rstepv").textContent = RSTEP;
+  $("rnote").textContent = note || "";
+}
+function clipPts(pts) {
+  if (!RLO || !RHI || RHI <= RLO) return pts;
+  const out = pts.filter((q) => q[0] >= RLO && q[0] <= RHI);
+  return out.length >= 2 ? out : pts;
+}
+function saveRange() {
+  localStorage.setItem("sv_rlo", String(RLO));
+  localStorage.setItem("sv_rhi", String(RHI));
+  localStorage.setItem("sv_rstep", String(RSTEP));
+}
+$("rauto").onclick = () => { RLO = RHI = 0; saveRange(); go(); };
+$("rlo").onchange = () => { RLO = Number($("rlo").value) || 0; saveRange(); go(); };
+$("rhi").onchange = () => { RHI = Number($("rhi").value) || 0; saveRange(); go(); };
+$("rminus").onclick = () => { RSTEP = Math.max(10, RSTEP - 10); saveRange(); go(); };
+$("rplus").onclick = () => { RSTEP = Math.min(100, RSTEP + 10); saveRange(); go(); };
+
 /* สีตามจอ PC: ค่า greek บวก = เขียว · ลบ = แดง (ทุกตัว รวม M2M) ·
    BE ลงสีเฉพาะ "ลูกศร" (↓ แดง = short vol · ↑ เขียว = long vol) ตัวเลขคงสีปกติ
    — ดู PositionSummary.tsx ฟังก์ชัน BE() ที่จอ PC ใช้ */
@@ -721,7 +794,10 @@ function renderLive(a) {
   $("besub").innerHTML = beHTML(gA.beLower, gA.beLoDir, gA.beUpper, gA.beHiDir);
   $("totcard").hidden = false;
 
-  const aPts = ptsOf(pf.asOf), tPts = ptsOf(pf.today);
+  const aFull = ptsOf(pf.asOf), tFull = ptsOf(pf.today);
+  if (aFull.length) RAUTO = { lo: aFull[0][0], hi: aFull[aFull.length - 1][0] };
+  const aPts = clipPts(aFull), tPts = clipPts(tFull);
+  rangeUI("โหมด live ปรับได้เฉพาะซูมเข้าในช่วงที่เครื่องเทรดส่งมา");
   drawPayoff($("pay"), aPts, F, gA.be || []);
   $("paysub").textContent = aPts.length
     ? `range ${fmt(aPts[0][0], 0)}–${fmt(aPts[aPts.length - 1][0], 0)}`
@@ -801,13 +877,13 @@ const atF = (pts, F) => {
 
 function drawPayoff(sv, pts, F, be) {
   if (!pts || pts.length < 2) { sv.innerHTML = ""; return; }
-  const W = 360, H = 190, PAD = 6;
+  const W = 360, H = 190, PAD = 6, AX = 13;      // AX = ที่ว่างใต้กราฟไว้ใส่ตัวเลขราคา
   const xs = pts.map((d) => d[0]);
   const ys = pts.flatMap((d) => [d[1], d[2]]).filter((v) => v != null);
   const x0 = Math.min(...xs), x1 = Math.max(...xs);
   const y0 = Math.min(...ys, 0), y1 = Math.max(...ys, 0);
   const X = (v) => PAD + (v - x0) / (x1 - x0) * (W - 2 * PAD);
-  const Y = (v) => H - PAD - (v - y0) / (y1 - y0 || 1) * (H - 2 * PAD);
+  const Y = (v) => H - PAD - AX - (v - y0) / (y1 - y0 || 1) * (H - 2 * PAD - AX);
   const line = (i) => pts.map((d, n) => (n ? "L" : "M") + X(d[0]).toFixed(1) + " " +
     Y(d[i]).toFixed(1)).join(" ");
   sv.setAttribute("viewBox", `0 0 ${W} ${H}`);
@@ -819,7 +895,23 @@ function drawPayoff(sv, pts, F, be) {
          `stroke-width="1" stroke-dasharray="3 3"/>` : "") +
     `<path d="${line(1)}" fill="none" stroke="#37d07c" stroke-width="1.6"/>` +
     `<path d="${line(2)}" fill="none" stroke="#ffc95c" stroke-width="1.2" ` +
-    `stroke-dasharray="5 4"/>`;
+    `stroke-dasharray="5 4"/>` +
+    xTicks(x0, x1, X, H, AX);
+}
+
+/* ตัวเลขราคาใต้กราฟ ทุก ๆ "step" ที่ตั้งไว้ (จอ PC โชว์ 960 980 … 1160 ใต้กราฟ)
+   ถ้าช่วงกว้างจน tick ถี่เกินอ่าน จะถ่างเป็นทวีคูณของ step เอง ไม่ปล่อยให้ตัวเลขทับกัน */
+function xTicks(x0, x1, X, H, AX) {
+  let st = RSTEP;
+  while ((x1 - x0) / st > 9) st *= 2;
+  const out = [];
+  const first = Math.ceil(x0 / st) * st;
+  for (let v = first; v <= x1; v += st) {
+    const anchor = v === first ? "start" : v + st > x1 ? "end" : "middle";
+    out.push(`<text x="${X(v).toFixed(1)}" y="${H - 2}" fill="#6b8199" font-size="9" ` +
+             `text-anchor="${anchor}">${Math.round(v)}</text>`);
+  }
+  return out.join("");
 }
 
 /* ── account picker ───────────────────────────────────────────────────────────
