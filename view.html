@@ -642,6 +642,26 @@ function renderDeals(deals) {
    ทันที ไม่งั้นมือถือจะปลุก relay ค้างไว้กินโควตาฟรีเปล่า ๆ */
 let LIVE = null;                 // payload ล่าสุดของบัญชีที่เลือก (null = ไม่มีใคร push)
 let liveTimer = null;
+let liveUntil = 0;               // หยุด auto-refresh เมื่อถึงเวลานี้ (กันเปิดค้างในกระเป๋า)
+
+/* ── กติกาประหยัดชั่วโมงฟรีของ Render ────────────────────────────────────────────
+   Render คิดเงินตาม "เวลาที่ instance ตื่น" ไม่ใช่จำนวน request และมันหลับเมื่อไม่มีใคร
+   เรียก 15 นาที ⇒ สิ่งที่แพงคือ "ปลุกไว้นาน ๆ" ไม่ใช่ "ยิงถี่"
+     1. ระหว่างเวลาเทรด เครื่องเทรด push ทุก ~20 วิอยู่แล้ว → relay ตื่นอยู่แล้ว
+        การ poll ของมือถือในช่วงนี้ **ไม่เพิ่มชั่วโมงเลย**
+     2. นอกเวลาเทรด ไม่ยิง /api/data เลย (ไม่มีอะไรใหม่ให้ดูอยู่แล้ว)
+     3. สลับแอป/จอดับ = หยุด poll ทันที (visibilitychange) — ตัวที่กินจริงคือหน้าเปิดค้าง
+     4. เปิดค้างเกิน 10 นาทีไม่แตะเลย = หยุดเอง แล้วโชว์ปุ่มให้กดอัปเดตเมื่อต้องการ
+   ห้ามแหกข้อ 2-4 (กติกาเดียวกับฝั่ง PC: ห้ามปลุก relay นอกเวลาเทรด)                */
+const LIVE_EVERY = 30000;        // วิ ระหว่าง refresh ตอนหน้าเปิดอยู่จริง
+const LIVE_IDLE_MS = 10 * 60000; // เปิดค้างเงียบ ๆ นานสุดก่อนหยุดเอง
+const TRADE_WIN = [[9 * 60 + 45, 12 * 60 + 30], [13 * 60 + 45, 16 * 60 + 55]];
+function inTradingHours() {
+  const d = new Date();                          // นาฬิกาเครื่อง = เวลาไทยของผู้ใช้
+  if (d.getDay() === 0 || d.getDay() === 6) return false;
+  const m = d.getHours() * 60 + d.getMinutes();
+  return TRADE_WIN.some((w) => m >= w[0] && m <= w[1]);
+}
 
 function matchLive(accounts) {
   for (const a of accounts || []) {
@@ -654,7 +674,8 @@ function matchLive(accounts) {
   return null;
 }
 
-async function loadLive() {
+async function loadLive(force) {
+  if (!force && !inTradingHours()) return null;   // นอกเวลาเทรด = ไม่มีใคร push อยู่แล้ว
   try {
     const r = await api("/api/data");
     if (!r.ok) return null;
@@ -732,11 +753,29 @@ function renderLive(a) {
   renderDeals(liveDeals(po.today || {}));
 }
 
+/* หยุด auto-refresh (เปิดค้างนานเกินไป) — ไม่ตัดขาด แค่ให้กดเอาเองเมื่ออยากได้ค่าล่าสุด
+   เพราะทุกครั้งที่ยิงคือการยืดเวลาที่ relay ตื่น = กินชั่วโมงฟรี */
+function liveIdle() {
+  clearTimeout(liveTimer);
+  $("err").innerHTML = 'หยุดอัปเดตอัตโนมัติแล้ว (เปิดค้างนาน) — '
+    + '<b id="liveresume" style="text-decoration:underline">แตะเพื่ออัปเดต</b>';
+  const el = $("liveresume");
+  if (el) el.onclick = () => { $("err").textContent = ""; liveUntil = Date.now() + LIVE_IDLE_MS; go(); };
+}
+
+/* จอดับ/สลับแอป = หยุดยิงทันที · กลับมาดูเมื่อไหร่ค่อยดึงใหม่รอบเดียวแล้วเดินต่อ
+   (หน้าเปิดค้างในกระเป๋าแล้วยิงทุก 30 วิ = ปลุก relay ทิ้งไว้ฟรี ๆ ทั้งวัน) */
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { clearTimeout(liveTimer); return; }
+  if (DATE === "live" && Date.now() < liveUntil) go();
+});
+
 /* รีเฟรชเองทุก 30 วิ **เฉพาะตอนดู LIVE และเจ้าของยัง push อยู่** — หยุด push เมื่อไหร่
    (ปิดตลาด/ปิดเครื่อง) เลิก poll ทันทีแล้วสลับไปวันล่าสุดของประวัติ */
 function liveLoop() {
   clearTimeout(liveTimer);
-  if (DATE !== "live") return;
+  if (DATE !== "live" || document.hidden) return;
+  if (Date.now() > liveUntil) { liveIdle(); return; }
   liveTimer = setTimeout(async () => {
     const a = await loadLive();
     if (!a) {
@@ -750,7 +789,7 @@ function liveLoop() {
     LIVE = a;
     renderLive(a);
     liveLoop();
-  }, 30000);
+  }, LIVE_EVERY);
 }
 
 // P/L ของเส้น T+0 ที่ราคาปัจจุบัน (จุดในกริดที่ใกล้ F ที่สุด — กริดมี F อยู่แล้วเกือบทุกครั้ง)
@@ -852,8 +891,9 @@ function go() {
   $("err").textContent = "";
   syncStepper();
   if (DATE === "live") {
+    liveUntil = Math.max(liveUntil, Date.now() + LIVE_IDLE_MS);
     if (LIVE) { renderLive(LIVE); liveLoop(); return; }
-    loadLive().then((a) => {
+    loadLive(true).then((a) => {
       if (!a) { $("err").textContent = "ยังไม่มีข้อมูลสด (เจ้าของไม่ได้เปิดเครื่อง/นอกเวลาเทรด)"; return; }
       LIVE = a; renderLive(a); liveLoop();
     });
@@ -905,9 +945,10 @@ async function main() {
   if (!ACCT || !KEY) { showSetup(); return; }
   await loadIndex();
   // มีคน push อยู่ = เปิดหน้ามาต้องเห็น "ตอนนี้" ก่อน (ตัวเลขชุดเดียวกับจอ PC)
-  const a = await loadLive();
+  const a = await loadLive();                 // นอกเวลาเทรดจะไม่ยิงเลย -> ไปที่ประวัติทันที
   if (a) {
     LIVE = a;
+    liveUntil = Date.now() + LIVE_IDLE_MS;
     window._days = ["live", ...(window._days || [])];
     const opt = document.createElement("option");
     opt.value = "live";
