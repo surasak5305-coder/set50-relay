@@ -58,9 +58,16 @@
   .menu-item:active { background:#1d3040; }
   .menu-sub { color:var(--dim); font-size:11px; }
   .menu-empty { padding:11px 12px; color:var(--dim); font-size:12px; }
+  /* token ใกล้หมดอายุ — ต้องเห็นก่อนวันตาย ไม่ใช่รู้ตอนหน้าเปิดไม่ได้แล้ว */
+  #tokwarn { display:none; border-radius:10px; padding:9px 12px; margin-bottom:10px;
+             font-size:12.5px; line-height:1.5; }
+  #tokwarn.warn { background:#3a2c10; border:1px solid #6b5320; color:var(--amber); }
+  #tokwarn.crit { background:#3d1518; border:1px solid #7a2a2f; color:var(--red); }
+  #tokwarn a { color:inherit; }
 </style>
 </head>
 <body>
+<div id="tokwarn"></div>
 <div class="card">
   <h1>SET50 Settle Monitor <span id="badge"></span></h1>
   <div class="dim" id="meta">loading…</div>
@@ -100,9 +107,29 @@ const fmt = (v, d) => v == null ? "-" : v.toLocaleString("en-US",
   { minimumFractionDigits: d ?? 2, maximumFractionDigits: d ?? 2 });
 const cls = (v) => v > 0 ? "pos" : v < 0 ? "neg" : "";
 
+/* GitHub บอกวันหมดอายุของ token มากับ header ของทุก response อยู่แล้ว → relay ส่งต่อ
+   เป็น X-Token-Days/X-Token-Exp กับ call ที่หน้านี้ยิงอยู่แล้ว = ไม่มี request เพิ่ม
+   หมดอายุเมื่อไหร่ หน้านี้ตายทันที (bundle มาจาก repo private) จึงต้องเตือนล่วงหน้า 7 วัน */
+function tokenWarn(resp) {
+  const d = resp && resp.headers.get("X-Token-Days");
+  if (d == null) return;
+  const days = Number(d), exp = resp.headers.get("X-Token-Exp") || "";
+  if (!Number.isFinite(days) || days > 7) return;
+  const el = $("tokwarn");
+  el.className = days < 0 ? "crit" : "warn";
+  el.innerHTML = (days < 0
+      ? `⛔ GitHub token <b>หมดอายุแล้ว</b> (${exp}) — หน้านี้จะไม่มีข้อมูลใหม่จนกว่าจะต่ออายุ`
+      : `⚠️ GitHub token หมดอายุใน <b>${days} วัน</b> (${exp}) — ต่ออายุก่อน ไม่งั้นหน้านี้ดับ`)
+    + `<br>ต่อที่แดชบอร์ดเครื่องเทรด: ⚙ Settings → การ์ด Usage → ปุ่ม <b>Renew token</b>`
+    + ` · หรือทำเองที่ <a href="https://github.com/settings/personal-access-tokens" target="_blank"` +
+      ` rel="noreferrer">GitHub</a> แล้วใส่ค่าใหม่ใน env <code>RELAY_GH_TOKEN</code> บน Render`;
+  el.style.display = "block";
+}
+
 async function main() {
   if (!ACCT) { $("err").textContent = "add ?acct=<account>&key=<relay key> to the URL once"; return; }
   const br = await fetch(`/api/bundle?acct=${encodeURIComponent(ACCT)}&key=${encodeURIComponent(KEY)}`);
+  tokenWarn(br);
   const b = await br.json();
   if (!br.ok) throw new Error("bundle: " + (b.error || br.status));
   if (qs.get("test") === "prov") {
@@ -224,6 +251,7 @@ async function loadAccounts() {
   m.innerHTML = '<div class="menu-empty">Loading…</div>';
   try {
     const r = await fetch(`/api/accounts?key=${encodeURIComponent(KEY)}`);
+    tokenWarn(r);
     const d = await r.json();
     if (!r.ok || !d.ok) throw new Error(d.error || "HTTP " + r.status);
     // the account on screen is already named on the button — listing it again would
