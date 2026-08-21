@@ -449,8 +449,11 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === "GET" && u.pathname === "/api/hist") {
     if (!authed(req, u)) return sendJSON(res, 401, { ok: false, error: "unauthorized" });
+    // ⚠️ ชื่อพารามิเตอร์ต้องไม่ใช่ "key" — ตัวนั้นคือคีย์ auth ของ relay (authed()) ถ้าใช้ชื่อซ้ำ
+    // จะหยิบคีย์ auth มาเป็นคีย์พอร์ตแล้วหาไม่เจอ ตอบ 404 ทุกครั้งที่มีการยืนยันตัวตน (เจอจริงตอน
+    // ยิงของจริงหลัง deploy — เครื่องเทสไม่มี RELAY_KEY เลยไม่โผล่)
     return void histHandler(res, String(u.searchParams.get("acct") || ""),
-                            String(u.searchParams.get("key") || ""),
+                            String(u.searchParams.get("hkey") || ""),
                             String(u.searchParams.get("date") || ""));
   }
   if (req.method === "GET" && u.pathname === "/api/accounts") {
