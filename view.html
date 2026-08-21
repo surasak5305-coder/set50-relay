@@ -45,6 +45,9 @@
   .tot td { border-top:1px solid var(--line); font-weight:600; }
   .tot td[colspan] { text-align:left; white-space:normal; }
   td.mut { color:#3c5169; }
+  td.nk, th.nk { color:#8fb3d9; width:15%; }            /* N = naked (futures-equivalent) */
+  th.k, td.k { width:22%; }
+  .sum { margin-top:6px; border-top:1px solid var(--line); padding-top:6px; }
   tr.atm td { background:#182c3f; }
   #err { color:var(--red); white-space:pre-wrap; }
   button, select { background:#1d3040; color:var(--tx); border:1px solid var(--line);
@@ -115,8 +118,15 @@
   <div class="dim" id="todaysub"></div>
 </div>
 <div class="card" id="tblcard" hidden>
-  <div class="dim" style="margin-bottom:4px">Positions as of — marks at <span id="marklbl"></span></div>
+  <div class="dim" style="margin-bottom:4px">Position Summary · <b>As of Today</b>
+    — marks at <span id="marklbl"></span></div>
   <table id="tbl"></table>
+  <div class="dim" id="asofsum"></div>
+</div>
+<div class="card" id="tradedcard" hidden>
+  <div class="dim" style="margin-bottom:4px">Position Summary · <b>Traded</b> — ดีลของวันนั้น</div>
+  <table id="tbl2"></table>
+  <div class="dim" id="tradedsum"></div>
 </div>
 <div class="card" id="setup" hidden>
   <div class="dim" style="margin-bottom:6px">
@@ -292,37 +302,145 @@ function render(d) {
     $("todaycard").hidden = true;
   }
 
-  // ตาราง: entries ที่แช่ไว้ (label/leg/qty/cost/mark) — qty ติดเครื่องหมายมาแล้ว (SF/SC/SP = ลบ)
-  // ยุบเป็น **แถวละ strike** (คอลัมน์ call / put) เหมือน Position Summary บนจอ PC — ถ้าโชว์
-  // ทีละขาจะได้ 60+ แถวบนจอมือถือ ต้องเลื่อนยาวมากกว่าจะเห็นยอดรวม
-  const rows = (rec.entries || []).filter((e) => e.qty);
-  $("marklbl").textContent = (rows[0] || {}).src || (final ? "settle" : "close");
-  let gross = 0, futQ = 0, futM = 0;
-  const byK = new Map();
-  for (const e of rows) {
-    const m = ((e.mark ?? 0) - (e.cost ?? 0)) * e.qty;
-    gross += m;
-    if (e.strike == null) { futQ += e.qty; futM += m; continue; }
-    const k = byK.get(e.strike) || { cq: 0, cm: 0, pq: 0, pm: 0 };
-    if (String(e.leg).endsWith("C")) { k.cq += e.qty; k.cm += m; } else { k.pq += e.qty; k.pm += m; }
-    byK.set(e.strike, k);
-  }
-  const num = (q, m) => q ? `<td>${q}</td><td class="${cls(m)}">${fmt(m, 0)}</td>`
-                          : '<td class="mut">·</td><td class="mut">·</td>';
-  const tb = ["<tr><th>Strike</th><th>C</th><th>M2M</th><th>P</th><th>M2M</th></tr>"];
-  if (futQ) tb.push(`<tr><td>TFEX</td><td>${futQ}</td><td class="${cls(futM)}">${fmt(futM, 0)}</td>` +
-                    '<td class="mut">·</td><td class="mut">·</td></tr>');
-  for (const K of [...byK.keys()].sort((a, b) => a - b)) {
-    const v = byK.get(K);
-    const atm = Math.abs(K - F) <= 5;
-    tb.push(`<tr${atm ? ' class="atm"' : ""}><td>${fmt(K, 0)}</td>${num(v.cq, v.cm)}${num(v.pq, v.pm)}</tr>`);
-  }
-  const comm = (rec.cons || 0) * (rec.commPt || 0);
-  tb.push(`<tr class="tot"><td colspan="4">Gross ${fmt(gross)} − comm ${fmt(comm)}</td>` +
-    `<td class="${cls(gross - comm)}">${fmt(gross - comm)}</td></tr>`);
-  $("tbl").innerHTML = tb.join("");
-  $("tblcard").hidden = rows.length === 0;
+  positionTables(rec, F, final);
 }
+
+/* ── Position Summary แบบเดียวกับจอ PC ────────────────────────────────────────
+   พอร์ตมาจาก dashboard_data._hist_position_tables: ตาราง As-of สร้างจาก entries ·
+   ตาราง Traded สร้างจาก todayDeals · คอลัมน์ N = "naked" = ความชันของเส้น payoff ที่
+   expiry (จำนวนสัญญา futures เทียบเท่าในโซนนั้น) · หน้าต่าง strike ของสองตารางคิดแยกกัน
+   เหมือนจอสด · ตรวจว่าตรงกับ /payoff-history ของเครื่องเทรดทุกช่องแล้ว */
+const STEP = 10;
+const legQC = (t, long) => {                    // [lq,lval,sq,sval] -> [qty, avgCost]
+  const q = long ? t[0] : t[2], v = long ? t[1] : t[3];
+  return [Math.round(q), q > 1e-9 ? Math.round((v / q) * 100) / 100 : 0];
+};
+function nakedSlope(legs, futQty) {             // legs: Map "K|cp" -> net qty (มีเครื่องหมาย)
+  const calls = [], puts = [];
+  for (const [kc, q] of legs) {
+    if (!q) continue;
+    const parts = kc.split("|");
+    (parts[1] === "C" ? calls : puts).push([Number(parts[0]), q]);
+  }
+  return (S) => {
+    let s = futQty;
+    for (const kq of calls) if (kq[0] < S) s += kq[1];
+    for (const kq of puts) if (kq[0] > S) s -= kq[1];
+    return s;
+  };
+}
+// N ซ้าย (ฝั่ง call) โชว์เมื่อ K >= ATM · N ขวา (ฝั่ง put) โชว์เมื่อ K <= ATM · ที่ ATM โชว์ทั้งคู่
+const nakedFor = (K, slope, atm) => [
+  K >= atm ? Math.round(slope(K + 5)) : null,
+  K <= atm ? Math.round(-slope(K - 5)) : null,
+];
+function displayStrikes(posKeys, F, target) {
+  target = target || 8;
+  const atm = Math.round(F / STEP) * STEP;
+  const strikes = [...posKeys].sort((a, b) => a - b);
+  const have = new Set(strikes);
+  for (let off = 0; strikes.length < target; off++) {
+    const cand = off === 0 ? [atm] : [atm + off * STEP, atm - off * STEP];
+    for (const k of cand) {
+      if (!have.has(k) && strikes.length < target) { have.add(k); strikes.push(k); }
+    }
+  }
+  return strikes.sort((a, b) => a - b);
+}
+function tableHTML(rows, tfex, atm) {
+  const cell = (v, c) => (v ? '<td class="' + (c || "") + '">' + v + "</td>"
+                            : '<td class="mut">·</td>');
+  const out = ['<tr><th class="nk">N</th><th>C</th><th class="k">Strike</th><th>P</th>'
+               + '<th class="nk">N</th></tr>'];
+  if (tfex) {
+    out.push('<tr><td class="mut">·</td>' + cell(tfex)
+             + '<td class="k">TFEX</td><td class="mut">·</td><td class="mut">·</td></tr>');
+  }
+  for (const r of rows) {
+    out.push("<tr" + (r.K === atm ? ' class="atm"' : "") + ">"
+      + cell(r.nl, "nk") + cell(r.c) + '<td class="k">' + fmt(r.K, 0) + "</td>"
+      + cell(r.p) + cell(r.nr, "nk") + "</tr>");
+  }
+  return out.join("");
+}
+function positionTables(rec, F, final) {
+  const ents = rec.entries || [];
+  const atm = Math.round(F / STEP) * STEP;
+  // ── As of: รวมขาต่อ (strike, C/P) จาก entries
+  const asof = new Map(), marks = new Map();
+  const aTfex = [0, 0, 0, 0];
+  for (const e of ents) {
+    const leg = e.leg || "", q = Math.abs(Number(e.qty) || 0), cost = Number(e.cost) || 0;
+    const i = leg.charAt(0) === "L" ? 0 : 2;
+    if (leg === "LF" || leg === "SF") { aTfex[i] += q; aTfex[i + 1] += q * cost; continue; }
+    const kc = (Number(e.strike) || 0) + "|" + leg.slice(1);
+    const t = asof.get(kc) || [0, 0, 0, 0];
+    t[i] += q; t[i + 1] += q * cost;
+    asof.set(kc, t);
+    if (e.mark != null) marks.set(kc, e.mark);
+  }
+  // ── Traded: net ต่อ (strike, C/P) จากดีลดิบของวันนั้น
+  const tdy = new Map();
+  let tFutNet = 0;
+  const tDeals = rec.todayDeals || [];
+  for (const dl of tDeals) {
+    const q = Number(dl.qty) || 0, px = Number(dl.price) || 0;
+    if (dl.leg === "TFEX") { tFutNet += q; continue; }
+    const m = String(dl.leg).match(/^(\d+(?:\.\d+)?)-([CP])$/);
+    if (!m) continue;
+    const kc = Number(m[1]) + "|" + m[2];
+    const c = tdy.get(kc) || { net: 0, deals: [] };
+    c.net += q; c.deals.push([q, px]);
+    tdy.set(kc, c);
+  }
+  const netOf = (t) => legQC(t, true)[0] - legQC(t, false)[0];
+  const aLegs = new Map(), tLegs = new Map();
+  for (const [kc, t] of asof) { const n = netOf(t); if (n) aLegs.set(kc, n); }
+  for (const [kc, c] of tdy) if (c.net) tLegs.set(kc, c.net);
+  const aFut = legQC(aTfex, true)[0] - legQC(aTfex, false)[0];
+  const aSlope = nakedSlope(aLegs, aFut), tSlope = nakedSlope(tLegs, tFutNet);
+  const kset = (legs, cells) => {
+    const ks = new Set();
+    for (const kc of legs.keys()) ks.add(Number(kc.split("|")[0]));
+    // ขาที่เทรดกลับหมดวันนั้น (net 0 แต่มีดีล) ต้องคงแถวไว้ — ตรงกับจอสด
+    if (cells) for (const [kc, c] of cells) if (c.deals.length) ks.add(Number(kc.split("|")[0]));
+    return ks;
+  };
+  const build = (strikes, slope, get) => strikes.map((K) => {
+    const n = nakedFor(K, slope, atm);
+    return { K: K, nl: n[0], nr: n[1], c: get(K, "C"), p: get(K, "P") };
+  });
+  const aRows = build(displayStrikes(kset(aLegs), F), aSlope,
+                      (K, cp) => netOf(asof.get(K + "|" + cp) || [0, 0, 0, 0]));
+  const tRows = build(displayStrikes(kset(tLegs, tdy), F), tSlope,
+                      (K, cp) => (tdy.get(K + "|" + cp) || { net: 0 }).net);
+  $("marklbl").textContent = (ents[0] || {}).src || (final ? "settle" : "close");
+  $("tbl").innerHTML = tableHTML(aRows, aFut, atm);
+  const cA = (rec.counts || {}).asOf || { orders: ents.length, cons: Math.round(rec.cons || 0) };
+  const g = rec.greeks || {};
+  const netA = rec.m2mSettle != null ? rec.m2mSettle : rec.m2m;
+  $("asofsum").innerHTML = '<div class="sum">' + cA.orders + " orders | " + cA.cons + " cons<br>"
+    + 'M2M <b class="' + cls(netA) + '">' + fmt(netA) + "</b> · Δ " + fmt(g.delta)
+    + " Γ " + fmt(g.gamma) + " V " + fmt(g.vega) + " Θ " + fmt(g.theta) + "</div>";
+  $("tblcard").hidden = ents.length === 0;
+
+  // M2M ฝั่ง Traded = (มาร์คของวันนั้น − ราคาที่เทรด) × qty (มาร์คชุดเดียวกับ As-of) − คอม
+  let tM2M = 0;
+  for (const [kc, c] of tdy) {
+    const mk = marks.get(kc);
+    if (mk != null) for (const d of c.deals) tM2M += (mk - d[1]) * d[0];
+  }
+  for (const dl of tDeals) {
+    if (dl.leg === "TFEX") tM2M += (F - (Number(dl.price) || 0)) * (Number(dl.qty) || 0);
+  }
+  const tComm = (rec.todayCons || 0) * (rec.commPt || 0);
+  $("tbl2").innerHTML = tableHTML(tRows, tFutNet, atm);
+  $("tradedsum").innerHTML = '<div class="sum">' + tDeals.length + " orders | "
+    + Math.round(rec.todayCons || 0) + ' cons<br>M2M <b class="' + cls(tM2M - tComm) + '">'
+    + fmt(tM2M - tComm) + "</b> (มาร์ควันนั้น − ราคาที่เทรด − คอม " + fmt(tComm) + ")</div>";
+  $("tradedcard").hidden = tDeals.length === 0;
+}
+
 
 // P/L ของเส้น T+0 ที่ราคาปัจจุบัน (จุดในกริดที่ใกล้ F ที่สุด — กริดมี F อยู่แล้วเกือบทุกครั้ง)
 const atF = (pts, F) => {
