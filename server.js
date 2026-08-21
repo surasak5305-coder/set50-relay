@@ -271,10 +271,110 @@ async function accountsHandler(res) {
         date: b.date || "", settled: !!b.settled, generatedAt: b.generatedAt || "" });
     }
     // newest bundle first, then by name -> the account you are most likely after is on top
+    // พอร์ตที่ push "ประวัติ" ไว้ อาจไม่มี bundle ตอนเย็น (คนละกลไก) — เมนูต้องมีครบทั้งคู่
+    // ไม่งั้นคนดูบนมือถือเห็นน้อยกว่าเมนู ▾ บนจอ PC โดยไม่รู้ว่าหายไปไหน
+    try {
+      const dir = await ghGet("/contents/" + _SUB_HIST + "?ref=main");
+      if (dir.status === 200) {
+        for (const f of await dir.json()) {
+          if (f.type !== "dir" || !VALID_ID.test(f.name)) continue;
+          const keys = await histIndex(f.name);
+          for (const k of keys) {
+            const last = k.days[k.days.length - 1] || "";
+            const had = accounts.find((a) => a.acct === f.name && a.series === k.series);
+            if (had) { had.hist = true; had.histKey = k.key; had.days = k.days.length; continue; }
+            accounts.push({ acct: f.name, profile: k.profile, series: k.series, date: last,
+                            settled: false, generatedAt: "", hist: true, histKey: k.key,
+                            days: k.days.length });
+          }
+        }
+      }
+    } catch (e) { /* ประวัติดึงไม่ได้ = ยังลิสต์ของที่มี bundle ได้ตามเดิม */ }
     accounts.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : a.acct < b.acct ? -1 : 1));
     acctsCache.res = { ok: true, accounts };
     acctsCache.at = Date.now();
     return sendJSON(res, 200, acctsCache.res, tokenHeaders());
+  } catch (e) {
+    return sendJSON(res, 502, { ok: false, error: String(e.message || e) });
+  }
+}
+
+/* ══════════ ประวัติ payoff รายวัน (payoff_hist/<acct>/<YYYY-MM>.json) ══════════
+ * เครื่องเทรด push ไฟล์เดือนขึ้น set50-ledger ทุกครั้งที่ปิดวัน (backend/payoff_hist_share.py)
+ * ในนั้นมีทุกอย่างที่หน้าจอ PC วาด: pts (เส้น As-of ที่คำนวณไว้แล้ว), F, T, legs, entries,
+ * greeks/be, m2m, todayLegs/todayFut/todayDeals ⇒ มือถือแค่ "วาด" ไม่ต้องมีเครื่องคิดเลข
+ * ฝั่งเซิร์ฟเวอร์เลย · ไฟล์เดือนละ ~130 KB ⇒ **ห้ามส่งทั้งไฟล์ให้มือถือ** ตัดเฉพาะวันที่ขอ
+ * เดือนที่ปิดไปแล้วไม่เปลี่ยนอีก · เดือนปัจจุบันเปลี่ยนวันละครั้ง ⇒ cache 10 นาทีพอ */
+const HIST_TTL = 10 * 60 * 1000;
+const histCache = {};                       // "acct/month" -> {at, data}
+const histIdxCache = {};                    // acct -> {at, keys}
+
+async function histMonth(acct, month) {
+  const ck = acct + "/" + month;
+  const c = histCache[ck];
+  if (c && Date.now() - c.at < HIST_TTL) return c.data;
+  const r = await ghGet("/contents/" + _SUB_HIST + "/" + encodeURIComponent(acct) + "/" +
+                        encodeURIComponent(month) + ".json?ref=main", true);
+  if (r.status !== 200) return null;
+  const data = await r.json();
+  histCache[ck] = { at: Date.now(), data };
+  return data;
+}
+
+const _SUB_HIST = "payoff_hist";
+
+/* คีย์ในไฟล์คือ "<ชื่อเล่น>::<บัญชี>::<ซีรีส์>" (รุ่นเก่าไม่มีชื่อเล่น) — คนดูต้องเลือกได้
+   ทั้งพอร์ตและซีรีส์ เหมือนเมนู ▾ บนจอ PC */
+function parseKey(k) {
+  const p = String(k).split("::");
+  if (p.length >= 3) return { profile: p[0], acct: p[1], series: p[2] };
+  if (p.length === 2) return { profile: "", acct: p[0], series: p[1] };
+  return { profile: "", acct: k, series: "" };
+}
+
+async function histIndex(acct) {
+  const c = histIdxCache[acct];
+  if (c && Date.now() - c.at < HIST_TTL) return c.keys;
+  const dir = await ghGet("/contents/" + _SUB_HIST + "/" + encodeURIComponent(acct) + "?ref=main");
+  if (dir.status !== 200) return [];
+  const months = (await dir.json())
+    .filter((f) => f.type === "file" && /^\d{4}-\d{2}\.json$/.test(f.name))
+    .map((f) => f.name.slice(0, -5))
+    .sort();
+  const byKey = {};
+  for (const m of months) {
+    const data = await histMonth(acct, m);
+    if (!data) continue;
+    for (const [k, days] of Object.entries(data)) {
+      (byKey[k] = byKey[k] || []).push(...Object.keys(days));
+    }
+  }
+  // รุ่นเก่าเขียนทั้งคีย์ที่มีชื่อเล่นและไม่มีชื่อเล่นของพอร์ตเดียวกัน ⇒ ยุบเป็นอันเดียว
+  // (ไม่งั้นเมนูมีสองบรรทัดที่เปิดแล้วได้ของเหมือนกัน) — เก็บอันที่มีชื่อเล่นไว้
+  const keys = Object.entries(byKey).map(([key, days]) => {
+    const p = parseKey(key);
+    return { key, ...p, days: [...new Set(days)].sort() };
+  });
+  const named = new Set(keys.filter((k) => k.profile).map((k) => k.acct + "::" + k.series));
+  const out = keys.filter((k) => k.profile || !named.has(k.acct + "::" + k.series))
+                  .sort((a, b) => (a.days[a.days.length - 1] < b.days[b.days.length - 1] ? 1 : -1));
+  histIdxCache[acct] = { at: Date.now(), keys: out };
+  return out;
+}
+
+async function histHandler(res, acct, key, date) {
+  if (!GH_TOKEN) return sendJSON(res, 500, { ok: false, error: "RELAY_GH_TOKEN not set" });
+  if (!VALID_ID.test(acct)) return sendJSON(res, 400, { ok: false, error: "bad acct" });
+  try {
+    const keys = await histIndex(acct);
+    if (!date) return sendJSON(res, 200, { ok: true, acct, keys }, tokenHeaders());
+    const k = key || (keys[0] || {}).key;
+    if (!k) return sendJSON(res, 404, { ok: false, error: "no history for " + acct });
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return sendJSON(res, 400, { ok: false, error: "bad date" });
+    const data = await histMonth(acct, date.slice(0, 7));
+    const rec = data && data[k] && data[k][date];
+    if (!rec) return sendJSON(res, 404, { ok: false, error: `no snapshot for ${date}` });
+    return sendJSON(res, 200, { ok: true, acct, key: k, date, ...parseKey(k), rec }, tokenHeaders());
   } catch (e) {
     return sendJSON(res, 502, { ok: false, error: String(e.message || e) });
   }
@@ -346,6 +446,12 @@ const server = http.createServer((req, res) => {
     if (!authed(req, u)) return sendJSON(res, 401, { ok: false, error: "unauthorized" });
     tokenRefresh();                          // เผื่อไม่มีใครแตะ GitHub มานาน (ไม่รอผล)
     return sendJSON(res, 200, tokenStatus());
+  }
+  if (req.method === "GET" && u.pathname === "/api/hist") {
+    if (!authed(req, u)) return sendJSON(res, 401, { ok: false, error: "unauthorized" });
+    return void histHandler(res, String(u.searchParams.get("acct") || ""),
+                            String(u.searchParams.get("key") || ""),
+                            String(u.searchParams.get("date") || ""));
   }
   if (req.method === "GET" && u.pathname === "/api/accounts") {
     if (!authed(req, u)) return sendJSON(res, 401, { ok: false, error: "unauthorized" });
