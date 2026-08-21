@@ -1,12 +1,17 @@
 <!doctype html>
-<!-- Mobile settle monitor — open after the PC is off: bundle (positions/payoff pushed by
-     backend/settle_push.py to GitHub) + official settlement fetched on-access from tfex.co.th.
-     No fixed schedule: whatever is published when you open is what you see. -->
+<!-- Mobile view of the SET50 Options dashboard — meant to be opened with the PC off.
+     Everything comes from the ledger repo on GitHub (through the relay, which holds the
+     read-only token):
+       payoff_hist/<acct>/<YYYY-MM>.json — one snapshot per trading day, holding the
+         As-of payoff curve ALREADY COMPUTED on the PC (pts), F/T, legs, position
+         entries, greeks/BE, M2M, plus that day's own deals (todayLegs/todayFut/…)
+       mobile/<acct>.json — the evening settle bundle (still served by /api/bundle)
+     No fixed schedule: whatever has been published when you open is what you see. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SET50 Settle Monitor</title>
+<title>SET50 Options · mobile</title>
 <link rel="manifest" href="/view.webmanifest">
 <link rel="icon" type="image/png" href="/view-icon-192.png">
 <link rel="apple-touch-icon" href="/view-icon-192.png">
@@ -21,7 +26,7 @@
   .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
           padding:10px 12px; margin-bottom:10px; }
   h1 { font-size:15px; margin-bottom:2px; }
-  .dim { color:var(--dim); font-size:12px; }
+  .dim { color:var(--dim); font-size:12px; overflow-wrap:anywhere; }
   .badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px;
            font-weight:600; margin-left:6px; vertical-align:1px; }
   .b-official { background:#123e29; color:var(--green); }
@@ -32,23 +37,23 @@
           table-layout:fixed; }
   th,td { padding:3px 2px; text-align:right; font-size:12px; overflow:hidden;
           text-overflow:ellipsis; white-space:nowrap; }
-  .dim { overflow-wrap:anywhere; }
   th { color:var(--dim); font-weight:500; border-bottom:1px solid var(--line); }
   td:first-child,th:first-child { text-align:left; }
-  tr.atm td { background:#182c3f; }
   .tot td { border-top:1px solid var(--line); font-weight:600; }
+  .tot td[colspan] { text-align:left; white-space:normal; }
+  td.mut { color:#3c5169; }
+  tr.atm td { background:#182c3f; }
   #err { color:var(--red); white-space:pre-wrap; }
-  button { background:#1d3040; color:var(--tx); border:1px solid var(--line);
-           border-radius:8px; padding:7px 14px; font-size:13px; }
+  button, select { background:#1d3040; color:var(--tx); border:1px solid var(--line);
+                   border-radius:8px; padding:7px 12px; font-size:13px; }
   svg { width:100%; height:190px; display:block; }
-  /* account picker — the phone's copy of the [Payoff][v] menu on the dashboard's
-     Position Summary card (same grammar: current account on the button, the others
-     in the drop-down; 🗄 = read from the GitHub ledger, which is all a phone gets) */
-  .acct-row { position:relative; margin-top:8px; }
-  .acct { padding:6px 10px; font-size:13px; display:inline-flex; align-items:center; gap:6px;
-          border-color:rgba(90,167,224,0.55); color:var(--tx); }
+  /* account picker + day stepper — สำเนาของเมนู [Payoff][▾] และปุ่ม ◀ วันที่ ▶ บนจอ PC
+     (ไวยากรณ์เดียวกัน: 🗄 = อ่านจาก ledger บน GitHub ซึ่งเป็นทางเดียวที่มือถือมี) */
+  .acct-row { position:relative; margin-top:8px; display:flex; gap:8px; align-items:center;
+              flex-wrap:wrap; }
+  .acct { padding:6px 10px; font-size:13px; display:inline-flex; align-items:center; gap:6px; }
   .acct .caret { font-size:16px; line-height:12px; color:var(--blue); }
-  .menu { position:absolute; z-index:5; top:calc(100% + 4px); left:0; min-width:min(280px,92vw);
+  .menu { position:absolute; z-index:5; top:calc(100% + 4px); left:0; min-width:min(300px,92vw);
           background:var(--card); border:1px solid var(--line); border-radius:10px;
           box-shadow:0 8px 24px rgba(0,0,0,0.55); overflow:hidden; }
   .menu-item { display:block; width:100%; text-align:left; border:0; border-radius:0;
@@ -58,6 +63,10 @@
   .menu-item:active { background:#1d3040; }
   .menu-sub { color:var(--dim); font-size:11px; }
   .menu-empty { padding:11px 12px; color:var(--dim); font-size:12px; }
+  .day-row { display:flex; gap:6px; align-items:center; margin-top:8px; }
+  .day-row select { flex:1; text-align:center; }
+  .day-row button { padding:7px 14px; }
+  .day-row button:disabled { opacity:0.35; }
   /* token ใกล้หมดอายุ — ต้องเห็นก่อนวันตาย ไม่ใช่รู้ตอนหน้าเปิดไม่ได้แล้ว */
   #tokwarn { display:none; border-radius:10px; padding:9px 12px; margin-bottom:10px;
              font-size:12.5px; line-height:1.5; }
@@ -69,7 +78,7 @@
 <body>
 <div id="tokwarn"></div>
 <div class="card">
-  <h1>SET50 Settle Monitor <span id="badge"></span></h1>
+  <h1>SET50 Options <span id="badge"></span></h1>
   <div class="dim" id="meta">loading…</div>
   <div class="acct-row">
     <button id="acctbtn" class="acct" hidden>
@@ -77,16 +86,27 @@
     </button>
     <div id="acctmenu" class="menu" hidden></div>
   </div>
+  <div class="day-row" id="dayrow" hidden>
+    <button id="prev" title="วันก่อนหน้า">◀</button>
+    <select id="days"></select>
+    <button id="next" title="วันถัดไป">▶</button>
+  </div>
 </div>
 <div class="card" id="totcard" hidden>
-  <div class="dim">Net M2M (as of, after commission)</div>
+  <div class="dim" id="nettitle">Net M2M</div>
   <div class="big" id="net"></div>
   <div class="dim" id="netsub"></div>
+  <div class="dim" id="besub"></div>
 </div>
 <div class="card" id="paycard" hidden>
-  <div class="dim" style="margin-bottom:4px">Payoff — expiry (solid) · T+0 at push time (dashed)</div>
+  <div class="dim" style="margin-bottom:4px">Payoff · As of Today — expiry (solid) · T+0 (dashed)</div>
   <svg id="pay" preserveAspectRatio="none"></svg>
   <div class="dim" id="paysub"></div>
+</div>
+<div class="card" id="todaycard" hidden>
+  <div class="dim" style="margin-bottom:4px">Payoff · Today — เฉพาะดีลที่ยิงวันนั้น</div>
+  <svg id="todaypay" preserveAspectRatio="none"></svg>
+  <div class="dim" id="todaysub"></div>
 </div>
 <div class="card" id="tblcard" hidden>
   <div class="dim" style="margin-bottom:4px">Positions as of — marks at <span id="marklbl"></span></div>
@@ -100,16 +120,21 @@ const qs = new URLSearchParams(location.search);
 for (const k of ["acct", "key"]) {
   if (qs.get(k)) localStorage.setItem("sv_" + k, qs.get(k));
 }
-const ACCT = qs.get("acct") || localStorage.getItem("sv_acct") || "";
+let ACCT = qs.get("acct") || localStorage.getItem("sv_acct") || "";
+let HKEY = localStorage.getItem("sv_hkey") || "";     // "<ชื่อเล่น>::<บัญชี>::<ซีรีส์>"
+let DATE = "";
 const KEY = qs.get("key") || localStorage.getItem("sv_key") || "";
 const $ = (id) => document.getElementById(id);
 const fmt = (v, d) => v == null ? "-" : v.toLocaleString("en-US",
   { minimumFractionDigits: d ?? 2, maximumFractionDigits: d ?? 2 });
 const cls = (v) => v > 0 ? "pos" : v < 0 ? "neg" : "";
+const esc = (v) => String(v == null ? "" : v).replace(/[&<>"]/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const api = (p) => fetch(p + (p.includes("?") ? "&" : "?") + "key=" + encodeURIComponent(KEY));
 
-/* GitHub บอกวันหมดอายุของ token มากับ header ของทุก response อยู่แล้ว → relay ส่งต่อ
-   เป็น X-Token-Days/X-Token-Exp กับ call ที่หน้านี้ยิงอยู่แล้ว = ไม่มี request เพิ่ม
-   หมดอายุเมื่อไหร่ หน้านี้ตายทันที (bundle มาจาก repo private) จึงต้องเตือนล่วงหน้า 7 วัน */
+/* GitHub บอกวันหมดอายุของ token มากับ header ของทุก response อยู่แล้ว → relay ส่งต่อเป็น
+   X-Token-Days/X-Token-Exp กับ call ที่หน้านี้ยิงอยู่แล้ว = ไม่มี request เพิ่ม
+   วันที่ token หมด หน้านี้ดับทันที (อ่าน repo private ไม่ได้) จึงต้องเตือนล่วงหน้า 7 วัน */
 function tokenWarn(resp) {
   const d = resp && resp.headers.get("X-Token-Days");
   if (d == null) return;
@@ -120,158 +145,230 @@ function tokenWarn(resp) {
   el.innerHTML = (days < 0
       ? `⛔ GitHub token <b>หมดอายุแล้ว</b> (${exp}) — หน้านี้จะไม่มีข้อมูลใหม่จนกว่าจะต่ออายุ`
       : `⚠️ GitHub token หมดอายุใน <b>${days} วัน</b> (${exp}) — ต่ออายุก่อน ไม่งั้นหน้านี้ดับ`)
-    + `<br>ต่อที่แดชบอร์ดเครื่องเทรด: ⚙ Settings → การ์ด Usage → ปุ่ม <b>Renew token</b>`
-    + ` · หรือทำเองที่ <a href="https://github.com/settings/personal-access-tokens" target="_blank"` +
-      ` rel="noreferrer">GitHub</a> แล้วใส่ค่าใหม่ใน env <code>RELAY_GH_TOKEN</code> บน Render`;
+    + `<br>ต่อที่แดชบอร์ดเครื่องเทรด: ⚙ Settings → การ์ด Usage → ปุ่ม <b>Renew token</b>`;
   el.style.display = "block";
 }
 
-async function main() {
-  if (!ACCT) { $("err").textContent = "add ?acct=<account>&key=<relay key> to the URL once"; return; }
-  const br = await fetch(`/api/bundle?acct=${encodeURIComponent(ACCT)}&key=${encodeURIComponent(KEY)}`);
-  tokenWarn(br);
-  const b = await br.json();
-  if (!br.ok) throw new Error("bundle: " + (b.error || br.status));
-  if (qs.get("test") === "prov") {
-    // dev harness: pretend the PC shut down before settle (provisional marks off by
-    // +1/+2) so the TFEX override + delta-net path runs — see settle-monitor notes
-    b.settled = false;
-    b.positions.asOf.tfex.fMark += 2;
-    for (const r of b.positions.asOf.rows) {
-      if (r.cMark != null) r.cMark += 1;
-      if (r.pMark != null) r.pMark += 1;
+/* ── Black-76 (พอร์ตมาจาก backend/set50_options.py) ────────────────────────────
+   ใช้กับเส้น T+0 ของการ์ด "Today" อย่างเดียว: snapshot เก็บเส้น As-of ที่คิดเสร็จแล้ว (pts)
+   แต่ไม่ได้เก็บเส้นของ Today ⇒ ต้องคิดเองตรงนี้จาก todayLegs · ตัวเลขต้องตรงกับจอ PC
+   จึงคัดลอกทั้งสูตรและค่าคงที่ R มา แล้วเทียบกับ /payoff-history ของเครื่องเทรดตอนเทส */
+const R = 0.0175;
+function erf(x) {                       // Abramowitz-Stegun 7.1.26 (|err| < 1.5e-7)
+  const s = x < 0 ? -1 : 1; x = Math.abs(x);
+  const t = 1 / (1 + 0.3275911 * x);
+  const y = 1 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t
+                 + 0.254829592) * t * Math.exp(-x * x);
+  return s * y;
+}
+const N = (x) => 0.5 * (1 + erf(x / Math.SQRT2));
+function black76(F, K, T, sigma, cp) {
+  if (T <= 0 || sigma <= 0) {
+    return Math.max(0, cp === "C" ? F - K : K - F) * Math.exp(-R * T);
+  }
+  const vt = sigma * Math.sqrt(T);
+  const d1 = (Math.log(F / K) + 0.5 * sigma * sigma * T) / vt, d2 = d1 - vt;
+  const dfr = Math.exp(-R * T);
+  return cp === "C" ? dfr * (F * N(d1) - K * N(d2)) : dfr * (K * N(-d2) - F * N(-d1));
+}
+/* legs = [K, cp, lq, lavg, sq, savg, sigma, adj] · fut = [lq, lavg, sq, savg] */
+function payoffPoints(legs, fut, prices, T, commPt) {
+  const f = fut && fut.length === 4 ? fut : [0, 0, 0, 0];
+  const flq = f[0], flavg = f[1], fsq = f[2], fsavg = f[3];
+  return prices.map((S) => {
+    let e = 0, n = 0;
+    for (const lg of legs) {
+      const K = lg[0], cp = lg[1], lq = lg[2], lavg = lg[3], sq = lg[4], savg = lg[5],
+            sigma = lg[6], adj = lg[7];
+      const intr = Math.max(0, cp === "C" ? S - K : K - S);
+      e += (intr - lavg) * lq - (intr - savg) * sq;
+      // ราคาขา T+0 = โมเดล + basis จาก mark จริง (ห้ามติดลบ — ปีกไกล adj ลบอาจกดต่ำกว่า 0)
+      const val = T > 0 ? Math.max(0, black76(S, K, T, sigma, cp) + adj) : intr;
+      n += (val - lavg) * lq - (val - savg) * sq;
     }
-  }
-  const sr = await fetch(`/api/settle?series=${encodeURIComponent(b.series)}`).catch(() => null);
-  const s = sr && sr.ok ? await sr.json() : null;
-
-  const official = !!(s && s.todayPublished && s.asof === b.date);
-  const legs = official ? s.legs : null;
-  const a = b.positions.asOf, t = a.tfex, g = a.greeks;
-
-  // marks: bundle values, overridden by official TFEX legs when the bundle is provisional
-  const mark = (K, cp, old) => {
-    if (old == null) return null;
-    const v = legs && legs[`${Math.round(K)}-${cp}`];
-    return v != null ? v : old;
-  };
-  const fNew = (legs && legs.FUT != null) ? legs.FUT : t.fMark;
-
-  // net M2M is linear in marks -> exact update from the PC-computed net (commission unchanged)
-  let delta = (t.lfQ - t.sfQ) * (fNew - t.fMark);
-  const rows = [];
-  let grossOld = (t.fMark - t.lfCost) * t.lfQ + (t.sfCost - t.fMark) * t.sfQ;
-  let grossNew = (fNew - t.lfCost) * t.lfQ + (t.sfCost - fNew) * t.sfQ;
-  rows.push({ label: "FUT", qty: t.lfQ - t.sfQ, mark: fNew, m2m: grossNew, atm: false });
-  for (const r of a.rows) {
-    for (const [cp, mk, lq, lc, sq, sc] of [
-      ["C", r.cMark, r.lcQ, r.lcCost, r.scQ, r.scCost],
-      ["P", r.pMark, r.lpQ, r.lpCost, r.spQ, r.spCost]]) {
-      if (mk == null || (!lq && !sq)) continue;
-      const m = mark(r.strike, cp, mk);
-      delta += (lq - sq) * (m - mk);
-      grossOld += (mk - lc) * lq + (sc - mk) * sq;
-      const gm = (m - lc) * lq + (sc - m) * sq;
-      grossNew += gm;
-      rows.push({ label: `${r.label} ${cp}`, qty: lq - sq, mark: m, m2m: gm, atm: r.isATM });
+    if (flq > 1e-9 || fsq > 1e-9) {
+      const fv = (S - flavg) * flq - (S - fsavg) * fsq;
+      e += fv; n += fv;
     }
-  }
-  const netNew = g.m2m + delta;
-  const comm = grossOld - g.m2m;              // implied commission, unchanged by marks
-
-  const settledSrc = b.settled ? "PC (Settrade)" : official ? "TFEX (live fetch)" : null;
-  $("badge").className = "badge " + (settledSrc ? "b-official" : "b-prov");
-  $("badge").textContent = settledSrc ? "OFFICIAL SETTLE" : "PROVISIONAL";
-  $("meta").textContent = `${b.account} · ${b.series} · ${b.date} · bundle ${b.generatedAt}`
-    + (settledSrc ? ` · settle via ${settledSrc}` : " · settle not published yet — refresh later");
-  $("net").textContent = fmt(netNew);
-  $("net").className = "big " + cls(netNew);
-  $("netsub").textContent = `gross ${fmt(grossNew)} − comm ${fmt(comm)} · F settle ${fmt(fNew, 1)}`
-    + ` · Δ ${fmt(g.delta)} Γ ${fmt(g.gamma)} V ${fmt(g.vega)} Θ ${fmt(g.theta)}`;
-  $("totcard").hidden = false;
-
-  $("acctlbl").textContent = (b.profile || b.account) + (b.series ? " · " + b.series : "");
-  $("acctbtn").hidden = false;
-
-  $("marklbl").textContent = settledSrc ? `official settle (${settledSrc})` : "close (provisional)";
-  const tb = ["<tr><th>Leg</th><th>Net qty</th><th>Mark</th><th>M2M</th></tr>"];
-  for (const r of rows) {
-    tb.push(`<tr${r.atm ? ' class="atm"' : ""}><td>${r.label}</td><td>${r.qty}</td>` +
-      `<td>${fmt(r.mark, r.label === "FUT" ? 1 : 2)}</td>` +
-      `<td class="${cls(r.m2m)}">${fmt(r.m2m)}</td></tr>`);
-  }
-  tb.push(`<tr class="tot"><td>Total gross</td><td></td><td></td>` +
-    `<td class="${cls(grossNew)}">${fmt(grossNew)}</td></tr>`);
-  $("tbl").innerHTML = tb.join("");
-  $("tblcard").hidden = false;
-  drawPayoff(b.payoff, fNew);
+    return [S, e - commPt, n - commPt];
+  });
 }
 
-function drawPayoff(p, F) {
-  const pts = p && p.asOf;
-  if (!pts || pts.length < 2) return;
+/* ── data ─────────────────────────────────────────────────────────────────── */
+async function loadIndex() {
+  const r = await api(`/api/hist?acct=${encodeURIComponent(ACCT)}`);
+  tokenWarn(r);
+  const d = await r.json();
+  if (!r.ok || !d.ok) throw new Error(d.error || "HTTP " + r.status);
+  const keys = d.keys || [];
+  if (!keys.length) throw new Error(`บัญชี ${ACCT} ยังไม่ได้แชร์ประวัติขึ้น GitHub`);
+  const k = keys.find((x) => x.key === HKEY) || keys[0];
+  HKEY = k.key;
+  localStorage.setItem("sv_hkey", HKEY);
+  $("acctlbl").textContent = (k.profile || k.acct) + (k.series ? " · " + k.series : "");
+  $("acctbtn").hidden = false;
+  // ใหม่สุดอยู่บนสุด — เปิดหน้ามาต้องได้วันล่าสุดเสมอ (เหมือนกดปุ่ม Payoff บนจอ PC)
+  const days = [...k.days].sort().reverse();
+  $("days").innerHTML = days.map((x) => `<option value="${esc(x)}">${esc(x)}</option>`).join("");
+  DATE = days.includes(DATE) ? DATE : days[0];
+  $("days").value = DATE;
+  $("dayrow").hidden = false;
+  window._days = days;
+}
+
+async function loadDay() {
+  const r = await api(`/api/hist?acct=${encodeURIComponent(ACCT)}` +
+                      `&key=${encodeURIComponent(HKEY)}&date=${encodeURIComponent(DATE)}`);
+  tokenWarn(r);
+  const d = await r.json();
+  if (!r.ok || !d.ok) throw new Error(d.error || "HTTP " + r.status);
+  render(d);
+}
+
+function render(d) {
+  const rec = d.rec, g = rec.greeks || {};
+  const F = rec.F, T = rec.T || 0;
+  const final = !!rec.final;
+  $("badge").className = "badge " + (final ? "b-official" : "b-prov");
+  $("badge").textContent = final ? "SETTLE" : "PROVISIONAL";
+  const counts = (rec.counts || {}).asOf || {};
+  $("meta").textContent = `${d.acct} · ${d.series} · ${d.date}`
+    + ` · F ${fmt(F, 1)} · ${fmt(T * 365, 0)}d to expiry`
+    + (rec.savedAt ? ` · saved ${rec.savedAt}` : "")
+    + (counts.orders != null ? ` · ${counts.orders} orders | ${counts.cons} cons` : "");
+
+  // M2M: ตัวเลขที่เครื่องเทรดคิดไว้เอง (ห้ามคิดใหม่ให้เพี้ยน) — m2mSettle = ปิดวันด้วย settle จริง
+  const net = rec.m2mSettle != null ? rec.m2mSettle : rec.m2m;
+  $("nettitle").textContent = rec.m2mSettle != null
+    ? "Net M2M (marked at settle, after commission)" : "Net M2M (after commission)";
+  $("net").textContent = fmt(net);
+  $("net").className = "big " + cls(net);
+  $("netsub").textContent = `Δ ${fmt(g.delta)} Γ ${fmt(g.gamma)} V ${fmt(g.vega)} Θ ${fmt(g.theta)}`
+    + (rec.m2m != null && rec.m2mSettle != null && rec.m2m !== rec.m2mSettle
+        ? ` · at marks ${fmt(rec.m2m)}` : "");
+  $("besub").textContent = (g.be || []).length
+    ? "BE " + g.be.map((v) => fmt(v, 1)).join(" / ") : "";
+  $("totcard").hidden = false;
+
+  // As-of: เส้นที่เครื่องเทรดคำนวณไว้แล้ว (ไม่คิดใหม่ = ตรงกับจอ PC แน่นอน)
+  const pts = (rec.pts || []).map((p) => (Array.isArray(p) ? p : [p.price, p.exp, p.now]));
+  drawPayoff($("pay"), pts, F, g.be || []);
+  $("paysub").textContent = pts.length
+    ? `range ${fmt(pts[0][0], 0)}–${fmt(pts[pts.length - 1][0], 0)} · P/L at F ${fmt(atF(pts, F))}`
+    : "snapshot นี้ไม่มีเส้นกราฟ";
+  $("paycard").hidden = false;
+
+  // Today: ดีลของวันนั้นล้วน ๆ — snapshot ไม่ได้เก็บเส้นไว้ จึงคิดจาก todayLegs ตรงนี้
+  const tLegs = rec.todayLegs || [], tFut = rec.todayFut || [0, 0, 0, 0];
+  const hasToday = tLegs.length || tFut[0] > 1e-9 || tFut[2] > 1e-9;
+  if (hasToday && pts.length) {
+    const comm = (rec.todayCons || 0) * (rec.commPt || 0);
+    const tp = payoffPoints(tLegs, tFut, pts.map((p) => p[0]), T, comm);
+    drawPayoff($("todaypay"), tp, F, []);
+    const deals = (rec.todayDeals || []).length;
+    $("todaysub").textContent = `P/L at F ${fmt(atF(tp, F))}`
+      + ` · ${deals} deal${deals === 1 ? "" : "s"} · ${fmt(rec.todayCons || 0, 0)} cons`;
+    $("todaycard").hidden = false;
+  } else {
+    $("todaycard").hidden = true;
+  }
+
+  // ตาราง: entries ที่แช่ไว้ (label/leg/qty/cost/mark) — qty ติดเครื่องหมายมาแล้ว (SF/SC/SP = ลบ)
+  // ยุบเป็น **แถวละ strike** (คอลัมน์ call / put) เหมือน Position Summary บนจอ PC — ถ้าโชว์
+  // ทีละขาจะได้ 60+ แถวบนจอมือถือ ต้องเลื่อนยาวมากกว่าจะเห็นยอดรวม
+  const rows = (rec.entries || []).filter((e) => e.qty);
+  $("marklbl").textContent = (rows[0] || {}).src || (final ? "settle" : "close");
+  let gross = 0, futQ = 0, futM = 0;
+  const byK = new Map();
+  for (const e of rows) {
+    const m = ((e.mark ?? 0) - (e.cost ?? 0)) * e.qty;
+    gross += m;
+    if (e.strike == null) { futQ += e.qty; futM += m; continue; }
+    const k = byK.get(e.strike) || { cq: 0, cm: 0, pq: 0, pm: 0 };
+    if (String(e.leg).endsWith("C")) { k.cq += e.qty; k.cm += m; } else { k.pq += e.qty; k.pm += m; }
+    byK.set(e.strike, k);
+  }
+  const num = (q, m) => q ? `<td>${q}</td><td class="${cls(m)}">${fmt(m, 0)}</td>`
+                          : '<td class="mut">·</td><td class="mut">·</td>';
+  const tb = ["<tr><th>Strike</th><th>C</th><th>M2M</th><th>P</th><th>M2M</th></tr>"];
+  if (futQ) tb.push(`<tr><td>TFEX</td><td>${futQ}</td><td class="${cls(futM)}">${fmt(futM, 0)}</td>` +
+                    '<td class="mut">·</td><td class="mut">·</td></tr>');
+  for (const K of [...byK.keys()].sort((a, b) => a - b)) {
+    const v = byK.get(K);
+    const atm = Math.abs(K - F) <= 5;
+    tb.push(`<tr${atm ? ' class="atm"' : ""}><td>${fmt(K, 0)}</td>${num(v.cq, v.cm)}${num(v.pq, v.pm)}</tr>`);
+  }
+  const comm = (rec.cons || 0) * (rec.commPt || 0);
+  tb.push(`<tr class="tot"><td colspan="4">Gross ${fmt(gross)} − comm ${fmt(comm)}</td>` +
+    `<td class="${cls(gross - comm)}">${fmt(gross - comm)}</td></tr>`);
+  $("tbl").innerHTML = tb.join("");
+  $("tblcard").hidden = rows.length === 0;
+}
+
+// P/L ของเส้น T+0 ที่ราคาปัจจุบัน (จุดในกริดที่ใกล้ F ที่สุด — กริดมี F อยู่แล้วเกือบทุกครั้ง)
+const atF = (pts, F) => {
+  let best = null, bd = Infinity;
+  for (const p of pts) { const d = Math.abs(p[0] - F); if (d < bd) { bd = d; best = p; } }
+  return best ? best[2] : null;
+};
+
+function drawPayoff(sv, pts, F, be) {
+  if (!pts || pts.length < 2) { sv.innerHTML = ""; return; }
   const W = 360, H = 190, PAD = 6;
-  const xs = pts.map((d) => d.price);
-  const ys = pts.flatMap((d) => [d.exp, d.now]).filter((v) => v != null);
+  const xs = pts.map((d) => d[0]);
+  const ys = pts.flatMap((d) => [d[1], d[2]]).filter((v) => v != null);
   const x0 = Math.min(...xs), x1 = Math.max(...xs);
   const y0 = Math.min(...ys, 0), y1 = Math.max(...ys, 0);
   const X = (v) => PAD + (v - x0) / (x1 - x0) * (W - 2 * PAD);
   const Y = (v) => H - PAD - (v - y0) / (y1 - y0 || 1) * (H - 2 * PAD);
-  const line = (k) => pts.map((d, i) => (i ? "L" : "M") + X(d.price).toFixed(1) + " " +
-    Y(d[k]).toFixed(1)).join(" ");
-  const sv = $("pay");
+  const line = (i) => pts.map((d, n) => (n ? "L" : "M") + X(d[0]).toFixed(1) + " " +
+    Y(d[i]).toFixed(1)).join(" ");
   sv.setAttribute("viewBox", `0 0 ${W} ${H}`);
   sv.innerHTML =
     `<line x1="0" x2="${W}" y1="${Y(0)}" y2="${Y(0)}" stroke="#33506b" stroke-width="1"/>` +
+    (be || []).filter((v) => v >= x0 && v <= x1).map((v) =>
+      `<line x1="${X(v)}" x2="${X(v)}" y1="0" y2="${H}" stroke="#4a6b8a" stroke-width="0.7"/>`).join("") +
     (F ? `<line x1="${X(F)}" x2="${X(F)}" y1="0" y2="${H}" stroke="#5aa7e0" ` +
          `stroke-width="1" stroke-dasharray="3 3"/>` : "") +
-    `<path d="${line("exp")}" fill="none" stroke="#37d07c" stroke-width="1.6"/>` +
-    `<path d="${line("now")}" fill="none" stroke="#ffc95c" stroke-width="1.2" ` +
+    `<path d="${line(1)}" fill="none" stroke="#37d07c" stroke-width="1.6"/>` +
+    `<path d="${line(2)}" fill="none" stroke="#ffc95c" stroke-width="1.2" ` +
     `stroke-dasharray="5 4"/>`;
-  const be = (p.beAsof || []).map((v) => fmt(v, 1)).join(" / ");
-  $("paysub").textContent = `range ${fmt(x0, 0)}–${fmt(x1, 0)} · BE ${be || "-"} · F ${fmt(F, 1)}`;
-  $("paycard").hidden = false;
 }
 
 /* ── account picker ───────────────────────────────────────────────────────────
-   Every account that ever pushed an evening bundle has a file in mobile/ on the
-   ledger repo, so /api/accounts (relay-side, needs the GitHub token) is the list.
-   Switching = remember it and reload /view — the key stays in localStorage, and a
-   clean reload re-runs the whole bundle+settle path for the new account. */
-const esc = (v) => String(v == null ? "" : v).replace(/[&<>"]/g,
-  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-
-function pick(acct) {
+   ทุกพอร์ต/ซีรีส์ที่เคย push ประวัติขึ้น ledger repo (ไม่ใช่เฉพาะที่มี bundle ตอนเย็น)
+   เลือกแล้วจำลง localStorage แล้วโหลดใหม่ — key ยังอยู่ ไม่ต้องใส่ซ้ำ */
+function pick(acct, hkey) {
   localStorage.setItem("sv_acct", acct);
-  location.href = "/view";                 // key already stored — no params needed
+  if (hkey) localStorage.setItem("sv_hkey", hkey);
+  location.href = "/view";
 }
 
 async function loadAccounts() {
   const m = $("acctmenu");
   m.innerHTML = '<div class="menu-empty">Loading…</div>';
   try {
-    const r = await fetch(`/api/accounts?key=${encodeURIComponent(KEY)}`);
+    const r = await api("/api/accounts");
     tokenWarn(r);
     const d = await r.json();
     if (!r.ok || !d.ok) throw new Error(d.error || "HTTP " + r.status);
-    // the account on screen is already named on the button — listing it again would
-    // just be a row that reloads the same page (same rule as the dashboard menu)
-    const items = (d.accounts || []).filter((a) => a.acct !== ACCT);
+    // พอร์ตที่กำลังดูอยู่มีชื่อบนปุ่มแล้ว — ลิสต์ซ้ำ = แถวที่กดแล้วได้หน้าเดิม (กติกาเดียวกับจอ PC)
+    const items = (d.accounts || []).filter((a) => !(a.acct === ACCT && a.histKey === HKEY));
     if (!items.length) {
-      m.innerHTML = '<div class="menu-empty">No other account has published a bundle yet</div>';
+      m.innerHTML = '<div class="menu-empty">ไม่มีพอร์ตอื่นที่แชร์ไว้</div>';
       return;
     }
     m.innerHTML = items.map((a) =>
-      `<button class="menu-item" data-acct="${esc(a.acct)}">🗄 ${esc(a.profile || a.acct)}` +
-      `${a.series ? " · " + esc(a.series) : ""}<span class="menu-sub"> · ${esc(a.date)}` +
-      `${a.settled ? " settle" : " provisional"}</span></button>`).join("");
+      `<button class="menu-item" data-acct="${esc(a.acct)}" data-key="${esc(a.histKey || "")}">` +
+      `🗄 ${esc(a.profile || a.acct)}${a.series ? " · " + esc(a.series) : ""}` +
+      `<span class="menu-sub"> · ${esc(a.date)}` +
+      `${a.hist ? ` · ${a.days} วัน` : " · settle only"}</span></button>`).join("");
     for (const el of m.querySelectorAll(".menu-item")) {
-      el.onclick = () => pick(el.dataset.acct);
+      el.onclick = () => pick(el.dataset.acct, el.dataset.key);
     }
   } catch (e) {
-    // never leave "Loading…" hanging: say what broke and let them tap again
-    m.innerHTML = `<div class="menu-empty">Couldn't load accounts — ${esc(e.message || e)}` +
-      `<br><b>tap to retry</b></div>`;
+    m.innerHTML = `<div class="menu-empty">โหลดรายชื่อไม่ได้ — ${esc(e.message || e)}` +
+      `<br><b>แตะเพื่อลองใหม่</b></div>`;
     m.querySelector(".menu-empty").onclick = loadAccounts;
   }
 }
@@ -280,10 +377,40 @@ $("acctbtn").onclick = (e) => {
   e.stopPropagation();
   const m = $("acctmenu");
   m.hidden = !m.hidden;
-  if (!m.hidden) void loadAccounts();       // re-read on each open: a bundle lands after the close
+  if (!m.hidden) void loadAccounts();
 };
 document.addEventListener("click", () => { $("acctmenu").hidden = true; });
 
+/* ── day stepper ── รายการเรียงใหม่→เก่า ⇒ ◀ (ย้อนอดีต) = index +1 */
+const step = (dir) => {
+  const days = window._days || [];
+  const i = days.indexOf(DATE) + dir;
+  if (i < 0 || i >= days.length) return;
+  DATE = days[i];
+  $("days").value = DATE;
+  go();
+};
+$("prev").onclick = () => step(1);
+$("next").onclick = () => step(-1);
+$("days").onchange = () => { DATE = $("days").value; go(); };
+
+function syncStepper() {
+  const days = window._days || [], i = days.indexOf(DATE);
+  $("prev").disabled = i >= days.length - 1;
+  $("next").disabled = i <= 0;
+}
+
+function go() {
+  $("err").textContent = "";
+  syncStepper();
+  loadDay().catch((e) => { $("err").textContent = String(e.message || e); });
+}
+
+async function main() {
+  if (!ACCT) { $("err").textContent = "add ?acct=<account>&key=<relay key> to the URL once"; return; }
+  await loadIndex();
+  go();
+}
 main().catch((e) => { $("err").textContent = String(e.message || e); });
 </script>
 </body>
