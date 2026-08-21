@@ -34,6 +34,7 @@
            font-weight:600; margin-left:6px; vertical-align:1px; }
   .b-official { background:#123e29; color:var(--green); }
   .b-prov { background:#443311; color:var(--amber); }
+  .b-live { background:#12303e; color:var(--blue); }
   .big { font-size:26px; font-weight:700; }
   .pos { color:var(--green); } .neg { color:var(--red); }
   table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums;
@@ -48,6 +49,13 @@
   td.nk, th.nk { width:15%; }                           /* N = naked (futures-equivalent) */
   th.k, td.k { width:22%; }
   .sum { margin-top:6px; border-top:1px solid var(--line); padding-top:6px; }
+  /* สองตารางข้างกันเหมือนจอ PC — บนมือถือแนวตั้งต้องบีบตัวอักษรลง (10 คอลัมน์ใน ~370px)
+     จึงตัดคอมมาหลักพันของ Strike ออกและลด padding แทนที่จะยอมให้ตัวเลขโดนตัด */
+  .pos-two { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .pos-two table { font-size:10.5px; }
+  .pos-two th, .pos-two td { padding:2px 1px; font-size:10.5px; }
+  .pos-two .sum { font-size:11px; }
+  .pos-h { color:var(--tx); font-size:12px; font-weight:600; margin-bottom:2px; }
   /* Orders ของวันนั้น — พับเก็บได้ บางวันมีหลายสิบดีล ไม่ควรดันการ์ดอื่นตกจอ (เหมือนจอ PC) */
   .deal-head { width:100%; text-align:left; background:transparent; border:0; padding:0;
                color:var(--dim); font-size:12px; }
@@ -138,15 +146,19 @@
 </div>
 <div>
 <div class="card" id="tblcard" hidden>
-  <div class="dim" style="margin-bottom:4px">Position Summary · <b>As of Today</b>
-    — marks at <span id="marklbl"></span></div>
-  <table id="tbl"></table>
-  <div class="dim" id="asofsum"></div>
-</div>
-<div class="card" id="tradedcard" hidden>
-  <div class="dim" style="margin-bottom:4px">Position Summary · <b>Traded</b> — ดีลของวันนั้น</div>
-  <table id="tbl2"></table>
-  <div class="dim" id="tradedsum"></div>
+  <div class="dim" style="margin-bottom:6px">Position Summary — marks at <span id="marklbl"></span></div>
+  <div class="pos-two">
+    <div id="asofcol">
+      <div class="pos-h">As of Today</div>
+      <table id="tbl"></table>
+      <div class="dim" id="asofsum"></div>
+    </div>
+    <div id="tradedcard">
+      <div class="pos-h">Today</div>
+      <table id="tbl2"></table>
+      <div class="dim" id="tradedsum"></div>
+    </div>
+  </div>
 </div>
 <div class="card" id="dealcard" hidden>
   <button id="dealhead" class="deal-head"></button>
@@ -177,6 +189,7 @@ for (const k of ["acct", "key"]) {
 }
 let ACCT = qs.get("acct") || localStorage.getItem("sv_acct") || "";
 let HKEY = localStorage.getItem("sv_hkey") || "";     // "<ชื่อเล่น>::<บัญชี>::<ซีรีส์>"
+let HSERIES = "";                                    // ซีรีส์ของคีย์ที่เลือก (จับคู่กับข้อมูลสด)
 let DATE = "";
 const KEY = qs.get("key") || localStorage.getItem("sv_key") || "";
 const $ = (id) => document.getElementById(id);
@@ -263,6 +276,7 @@ async function loadIndex() {
   const k = keys.find((x) => x.key === HKEY) || keys[0];
   HKEY = k.key;
   localStorage.setItem("sv_hkey", HKEY);
+  HSERIES = k.series || "";
   $("acctlbl").textContent = (k.profile || k.acct) + (k.series ? " · " + k.series : "");
   $("acctbtn").hidden = false;
   // ใหม่สุดอยู่บนสุด — เปิดหน้ามาต้องได้วันล่าสุดเสมอ (เหมือนกดปุ่ม Payoff บนจอ PC)
@@ -472,7 +486,7 @@ function tableHTML(rows, tfex, atm) {
   }
   for (const r of rows) {
     out.push("<tr" + (r.K === atm ? ' class="atm"' : "") + ">"
-      + cell(r.nl, "nk") + cell(r.c) + '<td class="k">' + fmt(r.K, 0) + "</td>"
+      + cell(r.nl, "nk") + cell(r.c) + '<td class="k">' + Math.round(r.K) + "</td>"
       + cell(r.p) + cell(r.nr, "nk") + "</tr>");
   }
   return out.join("");
@@ -562,6 +576,7 @@ function positionTables(rec, F, final) {
     + " V " + fmt(tg.vega) + " Θ " + fmt(tg.theta)
     + "<br>" + beLine(tbe, F, tl, tf, tComm) + "</div>";
   $("tradedcard").hidden = tDeals.length === 0;
+  $("tblcard").hidden = false;
   renderDeals(tDeals);
 }
 
@@ -587,6 +602,130 @@ function renderDeals(deals) {
   };
 }
 
+
+/* ── โหมด LIVE (วันนี้ ตอนนี้) ────────────────────────────────────────────────
+   ประวัติย้อนหลังมาจาก git = ภาพที่ตรึงตอนกด M2M Save ⇒ "วันนี้" ที่ได้จาก git คือภาพ
+   ตอน push ครั้งล่าสุด (เช้า) ไม่ใช่ตอนนี้ · ตัวเลขสดต้องมาจากเครื่องเทรดเท่านั้น เพราะ
+   M2M ต้องใช้ราคาตลาดปัจจุบันของทุกขา ซึ่งมือถือไม่มีทางรู้เอง
+   ระหว่างเวลาเทรด เครื่องเทรด push payoff+positions ที่ "คำนวณเสร็จแล้ว" ขึ้น relay ทุก ~20 วิ
+   (relay_mode = relay) ⇒ อ่าน /api/data แล้ววาดตรง ๆ = ตัวเลขชุดเดียวกับที่จอ PC โชว์
+   ⚠️ poll เฉพาะตอนบัญชียัง online — เจ้าของหยุด push (ปิดตลาด/ปิดเครื่อง) ต้องเลิก poll
+   ทันที ไม่งั้นมือถือจะปลุก relay ค้างไว้กินโควตาฟรีเปล่า ๆ */
+let LIVE = null;                 // payload ล่าสุดของบัญชีที่เลือก (null = ไม่มีใคร push)
+let liveTimer = null;
+
+function matchLive(accounts) {
+  for (const a of accounts || []) {
+    const po = a.positions || {};
+    if (!po.asOf) continue;
+    const acctOK = po.account ? String(po.account) === String(ACCT) : false;
+    const sameSeries = !HSERIES || !po.series || po.series === HSERIES;
+    if (acctOK && sameSeries) return a;
+  }
+  return null;
+}
+
+async function loadLive() {
+  try {
+    const r = await api("/api/data");
+    if (!r.ok) return null;
+    const d = await r.json();
+    const a = matchLive(d.accounts);
+    return a && a.online ? a : null;
+  } catch (e) {
+    return null;                 // relay ล่ม/หลับ = ไม่มี live เฉย ๆ ไม่ใช่ error ของหน้า
+  }
+}
+
+const ptsOf = (arr) => (arr || []).map((p) => (Array.isArray(p) ? p : [p.price, p.exp, p.now]));
+const rowsOf = (t) => (t.rows || []).map((r) => ({
+  K: r.strike, nl: r.nakedL, nr: r.nakedR, c: r.callN, p: r.putN,
+}));
+// ดีลของวันนี้จากตาราง Today (แนบมารายช่องอยู่แล้ว) → รายการเดียวกับแถบ Orders ของ history
+function liveDeals(t) {
+  const out = [];
+  const tf = t.tfex || {};
+  for (const d of tf.callDeals || []) out.push({ leg: "TFEX", qty: d.qty, price: d.price });
+  for (const r of t.rows || []) {
+    for (const d of r.callDeals || []) out.push({ leg: r.label + "-C", qty: d.qty, price: d.price });
+    for (const d of r.putDeals || []) out.push({ leg: r.label + "-P", qty: d.qty, price: d.price });
+  }
+  return out;
+}
+
+function renderLive(a) {
+  const po = a.positions || {}, pf = a.payoff || {};
+  const F = pf.F || 0, atm = Math.round(F / STEP) * STEP;
+  const gA = (po.asOf || {}).greeks || {}, gT = (po.today || {}).greeks || {};
+  $("badge").className = "badge b-live";
+  $("badge").textContent = "LIVE";
+  const cnt = po.counts || {};
+  $("meta").textContent = `${po.account || ACCT} · ${po.series || ""} · วันนี้`
+    + ` · F ${fmt(F, 1)} · ${fmt(pf.days || 0, 0)}d to expiry · อัปเดตเมื่อ ${a.lastBeat} ที่แล้ว`
+    + ((cnt.asOf || {}).orders != null ? ` · ${cnt.asOf.orders} orders | ${cnt.asOf.cons} cons` : "");
+
+  $("nettitle").textContent = "Net M2M (สด · หลังหักคอม)";
+  $("net").textContent = fmt(gA.m2m);
+  $("net").className = "big " + cls(gA.m2m);
+  $("netsub").textContent = `Δ ${fmt(gA.delta)} Γ ${fmt(gA.gamma)} V ${fmt(gA.vega)} Θ ${fmt(gA.theta)}`;
+  $("besub").textContent = (gA.be || []).length
+    ? "BE " + gA.be.map((v) => fmt(v, 1)).join(" / ") : "";
+  $("totcard").hidden = false;
+
+  const aPts = ptsOf(pf.asOf), tPts = ptsOf(pf.today);
+  drawPayoff($("pay"), aPts, F, gA.be || []);
+  $("paysub").textContent = aPts.length
+    ? `range ${fmt(aPts[0][0], 0)}–${fmt(aPts[aPts.length - 1][0], 0)}`
+      + ` · P/L at F ${fmt(pf.asOfAtF ? pf.asOfAtF.now : atF(aPts, F))}` : "";
+  $("paycard").hidden = false;
+  if (tPts.length) {
+    drawPayoff($("todaypay"), tPts, F, gT.be || []);
+    $("todaysub").textContent = `P/L at F ${fmt(pf.todayAtF ? pf.todayAtF.now : atF(tPts, F))}`
+      + ` · ${(cnt.today || {}).orders || 0} deals · ${(cnt.today || {}).cons || 0} cons`;
+    $("todaycard").hidden = false;
+  } else { $("todaycard").hidden = true; }
+
+  const arrow = (v, d) => (v ? (d === "up" ? "↑" : d === "down" ? "↓" : "") + fmt(v, 1) : "");
+  const beRow = (g) => [arrow(g.beLower, g.beLoDir), arrow(g.beUpper, g.beHiDir)]
+    .filter(Boolean).join(" ");
+  $("marklbl").textContent = "live (mid/smile)";
+  $("tbl").innerHTML = tableHTML(rowsOf(po.asOf || {}), ((po.asOf || {}).tfex || {}).callN, atm);
+  $("asofsum").innerHTML = '<div class="sum">' + ((cnt.asOf || {}).orders || 0) + " orders | "
+    + ((cnt.asOf || {}).cons || 0) + ' cons<br>M2M <b class="' + cls(gA.m2m) + '">' + fmt(gA.m2m)
+    + "</b> · Δ " + fmt(gA.delta) + " Γ " + fmt(gA.gamma) + " V " + fmt(gA.vega)
+    + " Θ " + fmt(gA.theta) + (beRow(gA) ? "<br>BE " + beRow(gA) : "") + "</div>";
+  $("tblcard").hidden = false;
+
+  const tRows = rowsOf(po.today || {});
+  $("tbl2").innerHTML = tableHTML(tRows, ((po.today || {}).tfex || {}).callN, atm);
+  $("tradedsum").innerHTML = '<div class="sum">' + ((cnt.today || {}).orders || 0) + " orders | "
+    + ((cnt.today || {}).cons || 0) + ' cons<br>M2M <b class="' + cls(gT.m2m) + '">' + fmt(gT.m2m)
+    + "</b> · Δ " + fmt(gT.delta) + " Γ " + fmt(gT.gamma) + " V " + fmt(gT.vega)
+    + " Θ " + fmt(gT.theta) + (beRow(gT) ? "<br>BE " + beRow(gT) : "") + "</div>";
+  $("tradedcard").hidden = tRows.length === 0;
+  renderDeals(liveDeals(po.today || {}));
+}
+
+/* รีเฟรชเองทุก 30 วิ **เฉพาะตอนดู LIVE และเจ้าของยัง push อยู่** — หยุด push เมื่อไหร่
+   (ปิดตลาด/ปิดเครื่อง) เลิก poll ทันทีแล้วสลับไปวันล่าสุดของประวัติ */
+function liveLoop() {
+  clearTimeout(liveTimer);
+  if (DATE !== "live") return;
+  liveTimer = setTimeout(async () => {
+    const a = await loadLive();
+    if (!a) {
+      LIVE = null;
+      $("err").textContent = "เจ้าของหยุดส่งข้อมูลสดแล้ว (ปิดตลาด/ปิดเครื่อง) — สลับไปภาพล่าสุดที่บันทึกไว้";
+      const days = (window._days || []).filter((d) => d !== "live");
+      if (days.length) { DATE = days[0]; $("days").value = DATE; }
+      go();
+      return;
+    }
+    LIVE = a;
+    renderLive(a);
+    liveLoop();
+  }, 30000);
+}
 
 // P/L ของเส้น T+0 ที่ราคาปัจจุบัน (จุดในกริดที่ใกล้ F ที่สุด — กริดมี F อยู่แล้วเกือบทุกครั้ง)
 const atF = (pts, F) => {
@@ -686,6 +825,15 @@ function syncStepper() {
 function go() {
   $("err").textContent = "";
   syncStepper();
+  if (DATE === "live") {
+    if (LIVE) { renderLive(LIVE); liveLoop(); return; }
+    loadLive().then((a) => {
+      if (!a) { $("err").textContent = "ยังไม่มีข้อมูลสด (เจ้าของไม่ได้เปิดเครื่อง/นอกเวลาเทรด)"; return; }
+      LIVE = a; renderLive(a); liveLoop();
+    });
+    return;
+  }
+  clearTimeout(liveTimer);
   loadDay().catch((e) => { $("err").textContent = String(e.message || e); });
 }
 
@@ -730,6 +878,18 @@ function showSetup(msg) {
 async function main() {
   if (!ACCT || !KEY) { showSetup(); return; }
   await loadIndex();
+  // มีคน push อยู่ = เปิดหน้ามาต้องเห็น "ตอนนี้" ก่อน (ตัวเลขชุดเดียวกับจอ PC)
+  const a = await loadLive();
+  if (a) {
+    LIVE = a;
+    window._days = ["live", ...(window._days || [])];
+    const opt = document.createElement("option");
+    opt.value = "live";
+    opt.textContent = "● ตอนนี้ (live · " + a.lastBeat + ")";
+    $("days").prepend(opt);
+    DATE = "live";
+    $("days").value = "live";
+  }
   go();
 }
 main().catch((e) => {
