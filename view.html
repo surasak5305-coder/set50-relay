@@ -22,6 +22,9 @@
   :root { --bg:#0d1520; --card:#13202e; --line:#22384e; --tx:#d7e3ee; --dim:#7d93a8;
           --green:#37d07c; --red:#ff6b6b; --amber:#ffc95c; --blue:#5aa7e0; }
   * { box-sizing:border-box; margin:0; }
+  /* ⚠️ ต้องมีบรรทัดนี้: .acct และ .day-row ตั้ง display เอง ซึ่ง "ชนะ" display:none ที่มากับ
+     แอตทริบิวต์ hidden (UA stylesheet) → ปุ่ม/ตัวเลือกวันโผล่มาเปล่า ๆ ตั้งแต่ยังไม่มีข้อมูล */
+  [hidden] { display:none !important; }
   body { background:var(--bg); color:var(--tx); font:14px/1.45 system-ui,sans-serif; padding:10px; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
           padding:10px 12px; margin-bottom:10px; }
@@ -67,6 +70,9 @@
   .day-row select { flex:1; text-align:center; }
   .day-row button { padding:7px 14px; }
   .day-row button:disabled { opacity:0.35; }
+  #setup input { width:100%; background:#0f1a26; color:var(--tx); border:1px solid var(--line);
+                 border-radius:8px; padding:9px 10px; font-size:13px; }
+  #setuplist { margin-top:8px; }
   /* token ใกล้หมดอายุ — ต้องเห็นก่อนวันตาย ไม่ใช่รู้ตอนหน้าเปิดไม่ได้แล้ว */
   #tokwarn { display:none; border-radius:10px; padding:9px 12px; margin-bottom:10px;
              font-size:12.5px; line-height:1.5; }
@@ -111,6 +117,19 @@
 <div class="card" id="tblcard" hidden>
   <div class="dim" style="margin-bottom:4px">Positions as of — marks at <span id="marklbl"></span></div>
   <table id="tbl"></table>
+</div>
+<div class="card" id="setup" hidden>
+  <div class="dim" style="margin-bottom:6px">
+    เครื่องนี้ยังไม่เคยตั้งค่า — วาง<b>ลิงก์จาก QR</b> (หน้า <code>เปิดหน้ามือถือ.html</code>
+    บนเดสก์ท็อปเครื่องเทรด) ลงช่องนี้ครั้งเดียว แล้วกดบันทึก
+  </div>
+  <input id="setupval" type="text" inputmode="url" autocomplete="off" spellcheck="false"
+         placeholder="https://set50-relay.onrender.com/view?acct=…&key=…">
+  <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+    <button id="setupsave">บันทึก</button>
+    <span class="dim" id="setupmsg"></span>
+  </div>
+  <div id="setuplist"></div>
 </div>
 <div class="card"><button onclick="location.reload()">Refresh</button>
   <span class="dim" id="err"></span></div>
@@ -406,12 +425,54 @@ function go() {
   loadDay().catch((e) => { $("err").textContent = String(e.message || e); });
 }
 
+/* ── ตั้งค่าครั้งแรกบนเครื่องนี้ ────────────────────────────────────────────────
+   รับได้ทั้ง "ลิงก์เต็มจาก QR" และ "คีย์เปล่า ๆ" — ใส่คีย์อย่างเดียวก็ไปดึงรายชื่อพอร์ต
+   มาให้เลือกต่อได้ทันที (มือถือพิมพ์ยาก ๆ ควรต้องพิมพ์ให้น้อยที่สุด) */
+function showSetup(msg) {
+  $("meta").textContent = "ยังไม่ได้ตั้งค่าเครื่องนี้";
+  $("setup").hidden = false;
+  if (msg) $("setupmsg").textContent = msg;
+  $("setupsave").onclick = async () => {
+    const raw = ($("setupval").value || "").trim();
+    if (!raw) return;
+    let acct = "", key = raw;
+    try {
+      const u = new URL(raw);
+      acct = u.searchParams.get("acct") || "";
+      key = u.searchParams.get("key") || "";
+    } catch (e) { /* ไม่ใช่ URL = ถือว่าเป็นคีย์ */ }
+    if (!key) { $("setupmsg").textContent = "ลิงก์นี้ไม่มี key"; return; }
+    localStorage.setItem("sv_key", key);
+    if (acct) { localStorage.setItem("sv_acct", acct); location.href = "/view"; return; }
+    // มีแต่คีย์ → ให้เลือกพอร์ตจากรายชื่อจริง
+    $("setupmsg").textContent = "กำลังดึงรายชื่อพอร์ต…";
+    try {
+      const r = await fetch("/api/accounts?key=" + encodeURIComponent(key));
+      const d = await r.json();
+      if (!r.ok || !d.ok) throw new Error(d.error || "HTTP " + r.status);
+      $("setupmsg").textContent = "เลือกพอร์ต:";
+      $("setuplist").innerHTML = (d.accounts || []).map((a) =>
+        `<button class="menu-item" data-acct="${esc(a.acct)}" data-key="${esc(a.histKey || "")}">` +
+        `🗄 ${esc(a.profile || a.acct)}${a.series ? " · " + esc(a.series) : ""}</button>`).join("");
+      for (const el of $("setuplist").querySelectorAll(".menu-item")) {
+        el.onclick = () => pick(el.dataset.acct, el.dataset.key);
+      }
+    } catch (e) {
+      $("setupmsg").textContent = "คีย์ใช้ไม่ได้: " + (e.message || e);
+    }
+  };
+}
+
 async function main() {
-  if (!ACCT) { $("err").textContent = "add ?acct=<account>&key=<relay key> to the URL once"; return; }
+  if (!ACCT || !KEY) { showSetup(); return; }
   await loadIndex();
   go();
 }
-main().catch((e) => { $("err").textContent = String(e.message || e); });
+main().catch((e) => {
+  const m = String(e.message || e);
+  $("err").textContent = m;
+  if (/unauthorized|401/i.test(m)) showSetup("คีย์ไม่ถูกต้อง — วางลิงก์จาก QR ใหม่อีกครั้ง");
+});
 </script>
 </body>
 </html>
