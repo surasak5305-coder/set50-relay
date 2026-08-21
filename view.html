@@ -185,6 +185,9 @@ const fmt = (v, d) => v == null ? "-" : v.toLocaleString("en-US",
 const cls = (v) => v > 0 ? "pos" : v < 0 ? "neg" : "";
 const esc = (v) => String(v == null ? "" : v).replace(/[&<>"]/g,
   (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+/* M2M ของ snapshot — แหล่งเดียว (พอร์ตจาก dashboard_data._rec_m2m):
+   ของจริง = ค่าที่ปักตอนกด M2M Save · ไม่เคยกด Save = ค่าที่เขียนล่าสุด */
+const recM2M = (rec) => (rec.m2mSaved != null ? rec.m2mSaved : rec.m2m);
 const api = (p) => fetch(p + (p.includes("?") ? "&" : "?") + "key=" + encodeURIComponent(KEY));
 
 /* GitHub บอกวันหมดอายุของ token มากับ header ของทุก response อยู่แล้ว → relay ส่งต่อเป็น
@@ -292,15 +295,15 @@ function render(d) {
     + (rec.savedAt ? ` · saved ${rec.savedAt}` : "")
     + (counts.orders != null ? ` · ${counts.orders} orders | ${counts.cons} cons` : "");
 
-  // M2M: ตัวเลขที่เครื่องเทรดคิดไว้เอง (ห้ามคิดใหม่ให้เพี้ยน) — m2mSettle = ปิดวันด้วย settle จริง
-  const net = rec.m2mSettle != null ? rec.m2mSettle : rec.m2m;
-  $("nettitle").textContent = rec.m2mSettle != null
-    ? "Net M2M (marked at settle, after commission)" : "Net M2M (after commission)";
+  // M2M "ที่ยึดเป็นของจริง" = ค่าที่ปักตอนกด M2M Save (m2mSaved) — ผู้ใช้กำหนดไว้ 2026-08-18
+  // และเป็นตัวที่การ์ด Position Summary บนจอ PC โชว์ · m2mSettle = ตัวเทียบตอน settle ทางการ
+  // ⚠️ เคยหยิบ m2mSettle มาเป็นเลขหลัก → มือถือขึ้น 238.30 ขณะที่จอ PC ขึ้น 227.4 (2026-08-21)
+  const net = recM2M(rec);
+  $("nettitle").textContent = "Net M2M (ปักตอน M2M Save · หลังหักคอม)";
   $("net").textContent = fmt(net);
   $("net").className = "big " + cls(net);
   $("netsub").textContent = `Δ ${fmt(g.delta)} Γ ${fmt(g.gamma)} V ${fmt(g.vega)} Θ ${fmt(g.theta)}`
-    + (rec.m2m != null && rec.m2mSettle != null && rec.m2m !== rec.m2mSettle
-        ? ` · at marks ${fmt(rec.m2m)}` : "");
+    + (rec.m2mSettle != null && rec.m2mSettle !== net ? ` · at settle ${fmt(rec.m2mSettle)}` : "");
   $("besub").textContent = (g.be || []).length
     ? "BE " + g.be.map((v) => fmt(v, 1)).join(" / ") : "";
   $("totcard").hidden = false;
@@ -529,7 +532,7 @@ function positionTables(rec, F, final) {
   $("tbl").innerHTML = tableHTML(aRows, aFut, atm);
   const cA = (rec.counts || {}).asOf || { orders: ents.length, cons: Math.round(rec.cons || 0) };
   const g = rec.greeks || {};
-  const netA = rec.m2mSettle != null ? rec.m2mSettle : rec.m2m;
+  const netA = recM2M(rec);
   const aArrow = (v, d) => (v ? (d === "up" ? "↑" : d === "down" ? "↓" : "") + fmt(v, 1) : "");
   const aBe = [aArrow(g.beLower, g.beLoDir), aArrow(g.beUpper, g.beHiDir)].filter(Boolean).join(" ");
   $("asofsum").innerHTML = '<div class="sum">' + cA.orders + " orders | " + cA.cons + " cons<br>"
